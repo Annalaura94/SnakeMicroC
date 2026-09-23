@@ -1,0 +1,16 @@
+name: snakemicroc_processing
+
+channels:
+  - conda-forge
+  - bioconda
+
+dependencies:
+  - python=3.9
+  - bwa=0.7.19
+  - samtools=1.23
+  - pairtools=1.1.3
+  - pysam=0.23.0
+  - numpy=1.26
+  - pandas=1.5
+  - matplotlib=3.7
+  - pyyaml

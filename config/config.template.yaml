@@ -1,0 +1,109 @@
+results_dir: results
+tmpdir: /path/to/project/tmp
+reference:
+  fasta: /path/to/reference/GRCh38.fa
+  fai: /path/to/reference/GRCh38.fa.fai
+  assembly: hg38
+processing:
+  threads: 24
+  io_threads: 8
+  mapq: 40
+  walks_policy: 5unique
+  max_inter_align_gap: 30
+  sort_memory: 4G
+qc:
+  deep_min_nodup_pairs: 125000000
+  min_cis_ge_1kb_fraction: 0.4
+  recommended_total_pairs: 150000000
+  qc_map_resolution: 1000000
+contact_maps:
+  base_resolution: 25000
+  resolutions:
+  - 25000
+  - 50000
+  - 100000
+  - 250000
+  - 500000
+  - 1000000
+  balance_threads: 8
+  ignore_diags: 2
+reproducibility:
+  resolution: 100000
+  hicrep_h: 1
+  hicrep_max_distance: 5000000
+comparison:
+  control_condition: CONTROL
+  test_condition: TEST
+samples:
+  CTRL_1:
+    condition: CONTROL
+    clone: CTRL_1
+    r1: /path/to/CTRL_1_R1.fastq.gz
+    r2: /path/to/CTRL_1_R2.fastq.gz
+  CTRL_2:
+    condition: CONTROL
+    clone: CTRL_2
+    r1: /path/to/CTRL_2_R1.fastq.gz
+    r2: /path/to/CTRL_2_R2.fastq.gz
+  TEST_1:
+    condition: TEST
+    clone: TEST_1
+    r1: /path/to/TEST_1_R1.fastq.gz
+    r2: /path/to/TEST_1_R2.fastq.gz
+  TEST_2:
+    condition: TEST
+    clone: TEST_2
+    r1: /path/to/TEST_2_R1.fastq.gz
+    r2: /path/to/TEST_2_R2.fastq.gz
+compartments:
+  resolutions:
+  - 50000
+  - 100000
+  primary_resolution: 100000
+  primary_min_abs_e1: 0.05
+  sensitivity_min_abs_e1:
+  - 0.02
+  - 0.05
+  - 0.1
+boundaries:
+  resolution: 10000
+  windows:
+  - 200000
+  - 500000
+  primary_window: 500000
+  cluster_tolerance_bp: 20000
+  gene_radius_bp: 100000
+  threshold_method: Li
+contacts:
+  resolution: 50000
+  min_distance_bp: 150000
+  max_distance_bp: 5000000
+  prefilter_min_total_count: 20
+  prefilter_min_nonzero_samples: 2
+  differential_fdr: 0.05
+  differential_min_abs_log2fc: 0.75
+loops:
+  primary_resolution: 10000
+  sensitivity_resolutions:
+  - 5000
+  - 10000
+  - 25000
+  min_distance_bp: 50000
+  max_distance_bp: 5000000
+  pooled_dot_fdr: 0.02
+  differential_fdr: 0.05
+  differential_min_abs_log2fc: 0.75
+  sensitivity_abs_log2fc:
+  - 0.585
+  - 0.75
+  - 1.0
+  proximal_tss_radius_bp: 25000
+  quant_radius_bins: 1
+library_complexity:
+  depth_multipliers:
+  - 1.25
+  - 1.5
+  - 2.0
+  - 3.0
+  warning_multiplier: 2.0
+  min_marginal_unique_fraction: 0.5

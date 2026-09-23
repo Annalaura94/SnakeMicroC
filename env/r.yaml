@@ -1,0 +1,12 @@
+name: snakemicroc_r
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - r-base>=4.3
+  - bioconductor-edger
+  - r-data.table
+  - r-r.utils
+  - r-ggplot2
+  - r-patchwork
+  - r-scales

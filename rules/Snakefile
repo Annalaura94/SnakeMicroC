@@ -1,0 +1,982 @@
+# SnakeMicroC
+# Reproducible Micro-C processing, QC and downstream structural analysis.
+
+import os
+WORKFLOW_BASEDIR = os.path.abspath(workflow.basedir)
+
+# Support both:
+#   - /path/to/SnakeMicroC/Snakefile
+#   - /path/to/SnakeMicroC/rules/Snakefile
+if os.path.exists(
+    os.path.join(WORKFLOW_BASEDIR, "env", "processing.yaml")
+):
+    PIPELINE_DIR = WORKFLOW_BASEDIR
+else:
+    PIPELINE_DIR = os.path.abspath(
+        os.path.join(WORKFLOW_BASEDIR, "..")
+    )
+
+if not os.path.exists(
+    os.path.join(PIPELINE_DIR, "env", "processing.yaml")
+):
+    raise FileNotFoundError(
+        "Cannot locate SnakeMicroC pipeline root from "
+        f"workflow.basedir={workflow.basedir}"
+    )
+
+RESULTS = config.get("results_dir", "results")
+TMPDIR = config["tmpdir"]
+
+PROCESSING_ENV = os.path.join(PIPELINE_DIR, "env", "processing.yaml")
+DOWNSTREAM_ENV = os.path.join(PIPELINE_DIR, "env", "downstream.yaml")
+SCRIPTS = os.path.join(PIPELINE_DIR, "scripts")
+
+
+R_ENV = os.path.join(PIPELINE_DIR, "env", "r.yaml")
+
+CONTACT_RES = int(
+    config["contacts"]["resolution"]
+)
+
+LOOP_RES = int(
+    config["loops"]["primary_resolution"]
+)
+
+THREADS = int(
+    config.get("processing", {}).get("threads", 8)
+)
+
+BALANCE_THREADS = int(
+    config.get("contact_maps", {}).get(
+        "balance_threads",
+        config.get("processing", {}).get("balance_threads", 8)
+    )
+)
+
+IGNORE_DIAGS = int(
+    config.get("contact_maps", {}).get(
+        "ignore_diags",
+        config.get("processing", {}).get("ignore_diags", 2)
+    )
+)
+
+
+SAMPLES = list(config["samples"].keys())
+
+if len(SAMPLES) < 2:
+    raise ValueError("At least two samples are required.")
+
+CONDITIONS = [config["samples"][s]["condition"] for s in SAMPLES]
+
+CONTROL_CONDITION = config["comparison"]["control_condition"]
+TEST_CONDITION = config["comparison"]["test_condition"]
+
+CONTROL_SAMPLES = [
+    s for s in SAMPLES
+    if config["samples"][s]["condition"] == CONTROL_CONDITION
+]
+
+TEST_SAMPLES = [
+    s for s in SAMPLES
+    if config["samples"][s]["condition"] == TEST_CONDITION
+]
+
+if len(CONTROL_SAMPLES) < 2 or len(TEST_SAMPLES) < 2:
+    raise ValueError(
+        "SnakeMicroC currently requires at least two biological samples "
+        "per condition for differential analyses."
+    )
+
+CHROMSIZES = f"{RESULTS}/reference/chrom.sizes"
+MAIN_VIEW = f"{RESULTS}/reference/main_chromosomes.view.tsv"
+AUTOSOMES_VIEW = f"{RESULTS}/reference/autosomes.view.tsv"
+
+PAIR = f"{RESULTS}/pairs/{{sample}}/{{sample}}.nodups.pairs.gz"
+STATS = f"{RESULTS}/pairs/{{sample}}/{{sample}}.stats.txt"
+SCALING = f"{RESULTS}/qc/scaling/{{sample}}.scaling.tsv"
+QC_COOL = f"{RESULTS}/qc/maps/{{sample}}.1Mb.cool"
+MCOOL = f"{RESULTS}/mcool/{{sample}}.mcool"
+
+BASE_RES = int(config["contact_maps"]["base_resolution"])
+ZOOM_RES = [int(x) for x in config["contact_maps"]["resolutions"]]
+ZOOM_RES_CSV = ",".join(str(x) for x in ZOOM_RES)
+QC_RES = int(config["qc"]["qc_map_resolution"])
+COMP_RES = int(config["compartments"]["primary_resolution"])
+INS_RES = int(config["boundaries"]["resolution"])
+INS_WIN = int(config["boundaries"]["primary_window"])
+
+INS_WINDOWS = [
+    int(x)
+    for x in config["boundaries"]["windows"]
+]
+
+INS_WINDOWS_STR = " ".join(
+    str(x)
+    for x in INS_WINDOWS
+)
+
+BOUNDARY_THRESHOLD = str(
+    config["boundaries"]["threshold_method"]
+)
+HICREP_RES = int(config["reproducibility"]["resolution"])
+
+
+def sample_r1(wc):
+    return config["samples"][wc.sample]["r1"]
+
+
+def sample_r2(wc):
+    return config["samples"][wc.sample]["r2"]
+
+
+# Deliberately no default all-target. Run `snakemake ... qc` first.
+
+rule qc:
+    input:
+        summary=f"{RESULTS}/qc/qc_summary.tsv",
+        status=f"{RESULTS}/qc/qc_status.txt",
+        summary_pdf=f"{RESULTS}/qc/qc_summary.pdf",
+        scaling_pdf=f"{RESULTS}/qc/scaling_curves.pdf",
+        scaling_tsv=f"{RESULTS}/qc/scaling_curves.tsv",
+        maps_pdf=f"{RESULTS}/qc/contact_maps_1Mb.pdf",
+        corr_tsv=f"{RESULTS}/qc/contact_map_correlation_1Mb.tsv",
+        corr_pdf=f"{RESULTS}/qc/contact_map_correlation_1Mb.pdf",
+        complexity_tsv=f"{RESULTS}/qc/library_complexity.tsv",
+        complexity_pdf=f"{RESULTS}/qc/library_complexity.pdf",
+        complexity_status=f"{RESULTS}/qc/library_complexity_status.txt"
+
+
+rule downstream:
+    input:
+        expand(MCOOL, sample=SAMPLES),
+        f"{RESULTS}/reproducibility/hicrep_SCC_long.tsv",
+        f"{RESULTS}/reproducibility/hicrep_SCC_matrix.tsv",
+        f"{RESULTS}/structural/compartments_clone_effects.tsv.gz",
+        f"{RESULTS}/structural/insulation_clone_effects.tsv.gz",
+        f"{RESULTS}/contacts/differential_contacts50_all.tsv.gz",
+        f"{RESULTS}/contacts/differential_contacts50_core.tsv",
+        f"{RESULTS}/contacts/differential_contacts50_summary.tsv",
+        f"{RESULTS}/loops/differential_loops_all.tsv.gz",
+        f"{RESULTS}/loops/differential_loops_core.tsv",
+        f"{RESULTS}/loops/differential_loop_summary.tsv",
+
+
+
+rule prepare_reference:
+    input:
+        fai=config["reference"]["fai"]
+    output:
+        chromsizes=CHROMSIZES,
+        main_view=MAIN_VIEW,
+        autosomes_view=AUTOSOMES_VIEW
+    conda:
+        PROCESSING_ENV
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {RESULTS}/reference
+        python {SCRIPTS}/prepare_reference.py \
+          --fai {input.fai} \
+          --chrom-sizes {output.chromsizes} \
+          --main-view {output.main_view} \
+          --autosomes-view {output.autosomes_view}
+        """
+
+
+rule process_pairs:
+    input:
+        r1=sample_r1,
+        r2=sample_r2,
+        chromsizes=CHROMSIZES,
+        fasta=config["reference"]["fasta"]
+    output:
+        pairs=PAIR,
+        stats=STATS
+    log:
+        f"{RESULTS}/logs/{{sample}}.process_pairs.log"
+    threads:
+        int(config["processing"]["threads"])
+    params:
+        io_threads=int(config["processing"]["io_threads"]),
+        mapq=int(config["processing"]["mapq"]),
+        walks=config["processing"]["walks_policy"],
+        gap=int(config["processing"]["max_inter_align_gap"]),
+        sort_memory=config["processing"]["sort_memory"],
+        tmp=lambda wc: os.path.join(TMPDIR, wc.sample)
+    conda:
+        PROCESSING_ENV
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "$(dirname {output.pairs})" "$(dirname {log})" "{params.tmp}"
+        rm -f "{output.pairs}.tmp.gz" "{output.stats}.tmp"
+
+        (
+          bwa mem -5SP -T0 -t {threads} {input.fasta} {input.r1} {input.r2} \
+          | pairtools parse \
+              --min-mapq {params.mapq} \
+              --walks-policy {params.walks} \
+              --max-inter-align-gap {params.gap} \
+              --nproc-in {params.io_threads} \
+              --nproc-out {params.io_threads} \
+              --chroms-path {input.chromsizes} \
+          | pairtools sort \
+              --tmpdir {params.tmp} \
+              --nproc {threads} \
+              --memory {params.sort_memory} \
+          | pairtools dedup \
+              --nproc-in {params.io_threads} \
+              --nproc-out {params.io_threads} \
+              --output-stats "{output.stats}.tmp" \
+          | pairtools split \
+              --nproc-in {params.io_threads} \
+              --nproc-out {params.io_threads} \
+              --output-pairs "{output.pairs}.tmp.gz"
+        ) 2> {log}
+
+        mv "{output.stats}.tmp" "{output.stats}"
+        mv "{output.pairs}.tmp.gz" "{output.pairs}"
+        rm -rf "{params.tmp}"/*
+        """
+
+
+rule pairtools_scaling:
+    input:
+        pairs=PAIR,
+        view=MAIN_VIEW
+    output:
+        SCALING
+    threads:
+        int(config["processing"]["io_threads"])
+    conda:
+        PROCESSING_ENV
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "$(dirname {output})"
+        pairtools scaling \
+          --view {input.view} \
+          --nproc-in {threads} \
+          -o {output} \
+          {input.pairs}
+        """
+
+
+rule summarize_qc:
+    input:
+        stats=expand(STATS, sample=SAMPLES)
+    output:
+        tsv=f"{RESULTS}/qc/qc_summary.tsv",
+        pdf=f"{RESULTS}/qc/qc_summary.pdf",
+        status=f"{RESULTS}/qc/qc_status.txt"
+    conda:
+        PROCESSING_ENV
+    params:
+        samples=" ".join(SAMPLES),
+        conditions=" ".join(CONDITIONS),
+        min_nodup=float(config["qc"]["deep_min_nodup_pairs"]),
+        min_cis=float(config["qc"]["min_cis_ge_1kb_fraction"]),
+        recommended=float(config["qc"]["recommended_total_pairs"])
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {RESULTS}/qc
+        python {SCRIPTS}/summarize_qc.py \
+          --stats {input.stats} \
+          --samples {params.samples} \
+          --conditions {params.conditions} \
+          --min-nodup {params.min_nodup} \
+          --min-cis1kb-frac {params.min_cis} \
+          --recommended-total {params.recommended} \
+          --out-tsv {output.tsv} \
+          --out-pdf {output.pdf} \
+          --out-status {output.status}
+        """
+
+
+rule plot_scaling:
+    input:
+        expand(SCALING, sample=SAMPLES)
+    output:
+        pdf=f"{RESULTS}/qc/scaling_curves.pdf",
+        tsv=f"{RESULTS}/qc/scaling_curves.tsv"
+    conda:
+        PROCESSING_ENV
+    params:
+        samples=" ".join(SAMPLES),
+        control_samples=" ".join(CONTROL_SAMPLES),
+        test_samples=" ".join(TEST_SAMPLES),
+        insulation_window=INS_WIN
+    shell:
+        r"""
+        set -euo pipefail
+        python {SCRIPTS}/plot_scaling.py \
+          --inputs {input} \
+          --samples {params.samples} \
+          --out-pdf {output.pdf} \
+          --out-tsv {output.tsv}
+        """
+
+
+rule make_qc_cool:
+    input:
+        pairs=PAIR,
+        chromsizes=CHROMSIZES
+    output:
+        temp(QC_COOL)
+    threads:
+        int(config["contact_maps"]["balance_threads"])
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        res=QC_RES,
+        assembly=config["reference"]["assembly"],
+        ignore_diags=int(config["contact_maps"]["ignore_diags"])
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "$(dirname {output})"
+        python -m cooler cload pairs \
+          --assembly {params.assembly} \
+          -c1 2 -p1 3 -c2 4 -p2 5 \
+          {input.chromsizes}:{params.res} \
+          {input.pairs} \
+          {output}
+        python -m cooler balance -p {threads} --ignore-diags {params.ignore_diags} {output}
+        """
+
+
+rule plot_qc_contact_maps:
+    input:
+        expand(QC_COOL, sample=SAMPLES)
+    output:
+        f"{RESULTS}/qc/contact_maps_1Mb.pdf"
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        samples=" ".join(SAMPLES)
+    shell:
+        r"""
+        set -euo pipefail
+        python {SCRIPTS}/plot_contact_maps_multisample.py \
+          --cools {input} \
+          --samples {params.samples} \
+          --out-pdf {output}
+        """
+
+
+rule qc_correlation:
+    input:
+        expand(QC_COOL, sample=SAMPLES)
+    output:
+        tsv=f"{RESULTS}/qc/contact_map_correlation_1Mb.tsv",
+        pdf=f"{RESULTS}/qc/contact_map_correlation_1Mb.pdf"
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        samples=" ".join(SAMPLES)
+    shell:
+        r"""
+        set -euo pipefail
+        python {SCRIPTS}/plot_sample_correlation.py \
+          --cools {input} \
+          --samples {params.samples} \
+          --out-tsv {output.tsv} \
+          --out-pdf {output.pdf}
+        """
+
+
+rule make_base_cool:
+    input:
+        pairs=PAIR,
+        chromsizes=CHROMSIZES
+    output:
+        temp(f"{RESULTS}/mcool/tmp/{{sample}}.{BASE_RES}.cool")
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        res=BASE_RES,
+        assembly=config["reference"]["assembly"]
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "$(dirname {output})"
+        python -m cooler cload pairs \
+          --assembly {params.assembly} \
+          -c1 2 -p1 3 -c2 4 -p2 5 \
+          {input.chromsizes}:{params.res} \
+          {input.pairs} \
+          {output}
+        """
+
+
+rule make_mcool:
+    input:
+        f"{RESULTS}/mcool/tmp/{{sample}}.{BASE_RES}.cool"
+    output:
+        MCOOL
+    threads:
+        int(config["contact_maps"]["balance_threads"])
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        resolutions=ZOOM_RES_CSV,
+        ignore_diags=int(config["contact_maps"]["ignore_diags"])
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "$(dirname {output})"
+        python -m cooler zoomify \
+          -p {threads} \
+          -r {params.resolutions} \
+          --balance \
+          --balance-args '--nproc {threads} --ignore-diags {params.ignore_diags}' \
+          -o {output} \
+          {input}
+        """
+
+
+rule hicrep_reproducibility:
+    input:
+        mcools=expand(MCOOL, sample=SAMPLES),
+        view=AUTOSOMES_VIEW
+    output:
+        long=f"{RESULTS}/reproducibility/hicrep_SCC_long.tsv",
+        matrix=f"{RESULTS}/reproducibility/hicrep_SCC_matrix.tsv"
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        samples=" ".join(SAMPLES),
+        resolution=HICREP_RES,
+        h=int(config["reproducibility"]["hicrep_h"]),
+        maxdist=int(config["reproducibility"]["hicrep_max_distance"])
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {RESULTS}/reproducibility
+        python {SCRIPTS}/run_hicrep.py \
+          --mcools {input.mcools} \
+          --samples {params.samples} \
+          --view {input.view} \
+          --resolution {params.resolution} \
+          --h {params.h} \
+          --max-distance {params.maxdist} \
+          --out-long {output.long} \
+          --out-matrix {output.matrix}
+        """
+
+
+rule compartment_bins:
+    input:
+        MCOOL.replace("{sample}", SAMPLES[0])
+    output:
+        f"{RESULTS}/reference/bins.{COMP_RES}.tsv"
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        res=COMP_RES
+    shell:
+        r"""
+        set -euo pipefail
+        cooler dump --header -t bins '{input}::/resolutions/{params.res}' \
+          | cut -f1-3 > {output}
+        """
+
+
+rule gc_track:
+    input:
+        bins=f"{RESULTS}/reference/bins.{COMP_RES}.tsv",
+        fasta=config["reference"]["fasta"]
+    output:
+        f"{RESULTS}/reference/gc.{COMP_RES}.tsv"
+    conda:
+        DOWNSTREAM_ENV
+    shell:
+        r"""
+        set -euo pipefail
+        cooltools genome gc {input.bins} {input.fasta} > {output}
+        """
+
+
+rule compartments:
+    input:
+        mcool=MCOOL,
+        gc=f"{RESULTS}/reference/gc.{COMP_RES}.tsv",
+        view=MAIN_VIEW
+    output:
+        lam=f"{RESULTS}/structural/compartments/{{sample}}.{COMP_RES}.cis.lam.txt",
+        vecs=f"{RESULTS}/structural/compartments/{{sample}}.{COMP_RES}.cis.vecs.tsv"
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        res=COMP_RES,
+        prefix=lambda wc: f"{RESULTS}/structural/compartments/{wc.sample}.{COMP_RES}"
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {RESULTS}/structural/compartments
+        cooltools eigs-cis \
+          --view {input.view} \
+          --phasing-track {input.gc} \
+          --n-eigs 1 \
+          -o {params.prefix} \
+          '{input.mcool}::/resolutions/{params.res}'
+        """
+
+
+rule insulation:
+    input:
+        cool=f"{RESULTS}/loops/cool/{{sample}}.{LOOP_RES}.cool",
+        view=MAIN_VIEW
+    output:
+        f"{RESULTS}/structural/insulation/{{sample}}.{INS_RES}.{INS_WIN}.tsv"
+    threads:
+        BALANCE_THREADS
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        windows=INS_WINDOWS_STR,
+        threshold=BOUNDARY_THRESHOLD
+    shell:
+        r"""
+        set -euo pipefail
+
+        mkdir -p {RESULTS}/structural/insulation
+
+        cooltools insulation \
+          --view {input.view} \
+          -p {threads} \
+          --threshold {params.threshold} \
+          --append-raw-scores \
+          --clr-weight-name weight \
+          -o {output} \
+          {input.cool} \
+          {params.windows}
+        """
+
+
+rule compare_structural_tracks:
+    input:
+        e1=expand(f"{RESULTS}/structural/compartments/{{sample}}.{COMP_RES}.cis.vecs.tsv", sample=SAMPLES),
+        ins=expand(f"{RESULTS}/structural/insulation/{{sample}}.{INS_RES}.{INS_WIN}.tsv", sample=SAMPLES)
+    output:
+        comp=f"{RESULTS}/structural/compartments_clone_effects.tsv.gz",
+        ins=f"{RESULTS}/structural/insulation_clone_effects.tsv.gz"
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        samples=" ".join(SAMPLES),
+        control_samples=" ".join(CONTROL_SAMPLES),
+        test_samples=" ".join(TEST_SAMPLES),
+        insulation_window=INS_WIN
+    shell:
+        r"""
+        set -euo pipefail
+        python {SCRIPTS}/compare_structural_tracks.py \
+          --e1 {input.e1} \
+          --insulation {input.ins} \
+          --samples {params.samples} \
+          --control-samples {params.control_samples} \
+          --test-samples {params.test_samples} \
+          --insulation-window {params.insulation_window} \
+          --out-compartments {output.comp} \
+          --out-insulation {output.ins}
+        """
+
+
+# ============================================================
+# DIFFERENTIAL CONTACTS
+# ============================================================
+
+rule contact50_counts:
+    input:
+        mcools=expand(
+            MCOOL,
+            sample=SAMPLES
+        ),
+        view=AUTOSOMES_VIEW
+    output:
+        counts=f"{RESULTS}/contacts/contact50_condition_blind_counts.tsv.gz",
+        summary=f"{RESULTS}/contacts/contact50_prefilter_summary.tsv"
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        samples=",".join(SAMPLES),
+        mcool_pattern=lambda wildcards: MCOOL,
+        res=CONTACT_RES,
+        mindist=int(
+            config["contacts"]["min_distance_bp"]
+        ),
+        maxdist=int(
+            config["contacts"]["max_distance_bp"]
+        ),
+        mintotal=int(
+            config["contacts"]["prefilter_min_total_count"]
+        ),
+        minnonzero=int(
+            config["contacts"]["prefilter_min_nonzero_samples"]
+        )
+    shell:
+        r"""
+        set -euo pipefail
+
+        mkdir -p {RESULTS}/contacts
+
+        python {SCRIPTS}/build_contact50_counts.py \
+          --samples '{params.samples}' \
+          --resolution {params.res} \
+          --min-distance-bp {params.mindist} \
+          --max-distance-bp {params.maxdist} \
+          --prefilter-min-total-count {params.mintotal} \
+          --prefilter-min-nonzero-samples {params.minnonzero} \
+          --mcool-pattern '{params.mcool_pattern}' \
+          --autosomes-view {input.view} \
+          --outdir {RESULTS}/contacts
+        """
+
+
+rule differential_contacts50:
+    input:
+        rules.contact50_counts.output.counts
+    output:
+        all=f"{RESULTS}/contacts/differential_contacts50_all.tsv.gz",
+        core=f"{RESULTS}/contacts/differential_contacts50_core.tsv",
+        summary=f"{RESULTS}/contacts/differential_contacts50_summary.tsv",
+        filtering=f"{RESULTS}/contacts/contact50_edgeR_filtering_summary.tsv",
+        pdf=f"{RESULTS}/contacts/EXP_independent_contacts50_volcano.pdf"
+    conda:
+        R_ENV
+    params:
+        controls=",".join(CONTROL_SAMPLES),
+        tests=",".join(TEST_SAMPLES),
+        fdr=float(
+            config["contacts"]["differential_fdr"]
+        ),
+        lfc=float(
+            config["contacts"]["differential_min_abs_log2fc"]
+        )
+    shell:
+        r"""
+        set -euo pipefail
+
+        Rscript {SCRIPTS}/differential_contacts50_edgeR.R \
+          --input {input} \
+          --outdir {RESULTS}/contacts \
+          --fdr {params.fdr} \
+          --min-abs-log2fc {params.lfc} \
+          --control-samples '{params.controls}' \
+          --test-samples '{params.tests}'
+        """
+
+
+# ============================================================
+# CONDITION-BLIND LOOP CALLING
+# ============================================================
+
+rule loop_cool:
+    input:
+        pairs=PAIR,
+        chroms=CHROMSIZES
+    output:
+        f"{RESULTS}/loops/cool/{{sample}}.{LOOP_RES}.cool"
+    threads:
+        BALANCE_THREADS
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        res=LOOP_RES
+    shell:
+        r"""
+        set -euo pipefail
+
+        mkdir -p "$(dirname {output})"
+
+        cooler cload pairs \
+          -c1 2 -p1 3 \
+          -c2 4 -p2 5 \
+          {input.chroms}:{params.res} \
+          {input.pairs} \
+          {output}
+
+        cooler balance \
+          -p {threads} \
+          --ignore-diags {IGNORE_DIAGS} \
+          {output}
+        """
+
+
+rule pooled_loop_cool:
+    input:
+        expand(
+            f"{RESULTS}/loops/cool/{{sample}}.{LOOP_RES}.cool",
+            sample=SAMPLES
+        )
+    output:
+        f"{RESULTS}/loops/pooled_all_samples.{LOOP_RES}.cool"
+    threads:
+        BALANCE_THREADS
+    conda:
+        DOWNSTREAM_ENV
+    shell:
+        r"""
+        set -euo pipefail
+
+        mkdir -p {RESULTS}/loops
+        rm -f {output}.tmp.cool
+
+        cooler merge \
+          {output}.tmp.cool \
+          {input}
+
+        mv \
+          {output}.tmp.cool \
+          {output}
+
+        cooler balance \
+          -p {threads} \
+          --ignore-diags {IGNORE_DIAGS} \
+          {output}
+        """
+
+
+rule pooled_loop_expected:
+    input:
+        cool=rules.pooled_loop_cool.output,
+        view=MAIN_VIEW
+    output:
+        f"{RESULTS}/loops/pooled_all_samples.expected_cis.{LOOP_RES}.tsv"
+    threads:
+        THREADS
+    conda:
+        DOWNSTREAM_ENV
+    shell:
+        r"""
+        set -euo pipefail
+
+        cooltools expected-cis \
+          -p {threads} \
+          --view {input.view} \
+          -o {output} \
+          {input.cool}
+        """
+
+
+rule pooled_loop_dots:
+    input:
+        cool=rules.pooled_loop_cool.output,
+        expected=rules.pooled_loop_expected.output,
+        view=MAIN_VIEW
+    output:
+        f"{RESULTS}/loops/pooled_all_samples.dots.tsv"
+    threads:
+        THREADS
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        maxdist=int(
+            config["loops"]["max_distance_bp"]
+        ),
+        fdr=float(
+            config["loops"]["pooled_dot_fdr"]
+        )
+    shell:
+        r"""
+        set -euo pipefail
+
+        cooltools dots \
+          -p {threads} \
+          --view {input.view} \
+          --max-loci-separation {params.maxdist} \
+          --tile-size {params.maxdist} \
+          --fdr {params.fdr} \
+          -o {output} \
+          {input.cool} \
+          {input.expected}
+        """
+
+
+rule loop_counts:
+    input:
+        dots=rules.pooled_loop_dots.output,
+        cools=expand(
+            f"{RESULTS}/loops/cool/{{sample}}.{LOOP_RES}.cool",
+            sample=SAMPLES
+        )
+    output:
+        counts=f"{RESULTS}/loops/pooled_loop_candidates_counts.tsv.gz",
+        bedpe=f"{RESULTS}/loops/pooled_loop_candidates.bedpe.tsv"
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        samples=",".join(SAMPLES),
+        cool_pattern=lambda wildcards: f"{RESULTS}/loops/cool/{{sample}}.{LOOP_RES}.cool",
+        res=LOOP_RES,
+        mindist=int(
+            config["loops"]["min_distance_bp"]
+        ),
+        maxdist=int(
+            config["loops"]["max_distance_bp"]
+        ),
+        radius=int(
+            config["loops"]["quant_radius_bins"]
+        )
+    shell:
+        r"""
+        set -euo pipefail
+
+        python {SCRIPTS}/build_loop_counts.py \
+          --samples '{params.samples}' \
+          --resolution {params.res} \
+          --min-distance-bp {params.mindist} \
+          --max-distance-bp {params.maxdist} \
+          --quant-radius-bins {params.radius} \
+          --dots {input.dots} \
+          --cool-pattern '{params.cool_pattern}' \
+          --outdir {RESULTS}/loops
+        """
+
+
+rule differential_loops:
+    input:
+        rules.loop_counts.output.counts
+    output:
+        all=f"{RESULTS}/loops/differential_loops_all.tsv.gz",
+        core=f"{RESULTS}/loops/differential_loops_core.tsv",
+        summary=f"{RESULTS}/loops/differential_loop_summary.tsv",
+        filtering=f"{RESULTS}/loops/loop_filtering_summary.tsv",
+        pdf=f"{RESULTS}/loops/EXP_differential_loops_volcano.pdf"
+    conda:
+        R_ENV
+    params:
+        controls=",".join(CONTROL_SAMPLES),
+        tests=",".join(TEST_SAMPLES),
+        fdr=float(
+            config["loops"]["differential_fdr"]
+        ),
+        lfc=float(
+            config["loops"]["differential_min_abs_log2fc"]
+        )
+    shell:
+        r"""
+        set -euo pipefail
+
+        Rscript {SCRIPTS}/differential_loops_edgeR.R \
+          --input {input} \
+          --outdir {RESULTS}/loops \
+          --fdr {params.fdr} \
+          --min-abs-log2fc {params.lfc} \
+          --control-samples '{params.controls}' \
+          --test-samples '{params.tests}'
+        """
+
+
+rule library_complexity:
+    input:
+        stats=expand(
+            STATS,
+            sample=SAMPLES
+        )
+    output:
+        tsv=f"{RESULTS}/qc/library_complexity.tsv",
+        pdf=f"{RESULTS}/qc/library_complexity.pdf",
+        status=f"{RESULTS}/qc/library_complexity_status.txt"
+    conda:
+        PROCESSING_ENV
+    params:
+        samples=" ".join(SAMPLES),
+        conditions=" ".join(CONDITIONS),
+        multipliers=" ".join(
+            str(x)
+            for x in config[
+                "library_complexity"
+            ]["depth_multipliers"]
+        ),
+        warning=float(
+            config[
+                "library_complexity"
+            ]["warning_multiplier"]
+        ),
+        min_unique=float(
+            config[
+                "library_complexity"
+            ][
+                "min_marginal_unique_fraction"
+            ]
+        )
+    shell:
+        r"""
+        set -euo pipefail
+
+        mkdir -p {RESULTS}/qc
+
+        python {SCRIPTS}/library_complexity.py \
+          --stats {input.stats} \
+          --samples {params.samples} \
+          --conditions {params.conditions} \
+          --multipliers {params.multipliers} \
+          --warning-multiplier {params.warning} \
+          --min-marginal-unique-fraction {params.min_unique} \
+          --out-tsv {output.tsv} \
+          --out-pdf {output.pdf} \
+          --out-status {output.status}
+        """
+
+
+rule provenance_processing_versions:
+    output:
+        f"{RESULTS}/provenance/processing_versions.tsv"
+    conda:
+        PROCESSING_ENV
+    shell:
+        r"""
+        mkdir -p {RESULTS}/provenance
+        python {SCRIPTS}/write_env_versions.py --mode processing --output {output}
+        """
+
+
+rule provenance_downstream_versions:
+    output:
+        f"{RESULTS}/provenance/downstream_versions.tsv"
+    conda:
+        DOWNSTREAM_ENV
+    shell:
+        r"""
+        mkdir -p {RESULTS}/provenance
+        python {SCRIPTS}/write_env_versions.py --mode downstream --output {output}
+        """
+
+
+rule provenance_r_versions:
+    output:
+        f"{RESULTS}/provenance/r_versions.tsv"
+    conda:
+        R_ENV
+    shell:
+        r"""
+        mkdir -p {RESULTS}/provenance
+        Rscript {SCRIPTS}/write_r_versions.R {output}
+        """
+
+
+rule provenance:
+    input:
+        processing=f"{RESULTS}/provenance/processing_versions.tsv",
+        downstream=f"{RESULTS}/provenance/downstream_versions.tsv",
+        r=f"{RESULTS}/provenance/r_versions.tsv"
+    output:
+        config=f"{RESULTS}/provenance/resolved_config.yaml",
+        versions=f"{RESULTS}/provenance/software_versions.tsv",
+        summary=f"{RESULTS}/provenance/run_summary.tsv"
+    conda:
+        DOWNSTREAM_ENV
+    script:
+        f"{SCRIPTS}/write_provenance.py"
+
+
+rule all:
+    input:
+        rules.qc.input,
+        rules.downstream.input,
+        f"{RESULTS}/provenance/resolved_config.yaml",
+        f"{RESULTS}/provenance/software_versions.tsv",
+        f"{RESULTS}/provenance/run_summary.tsv"

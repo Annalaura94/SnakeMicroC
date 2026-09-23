@@ -1,0 +1,20 @@
+name: snakemicroc_downstream
+channels:
+- conda-forge
+- bioconda
+dependencies:
+- python=3.10
+- cooler>=0.10
+- cooltools>=0.6
+- bioframe
+- numpy
+- scipy
+- pandas
+- matplotlib
+- pyyaml
+- h5py
+- scikit-image
+- pysam
+- pip
+- pip:
+  - hicrep

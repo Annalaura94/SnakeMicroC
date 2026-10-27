@@ -68,7 +68,7 @@ def file_url(file_path, report_dir):
     return quote(rel.replace(os.sep, "/"), safe="/-._")
 
 
-def render_report(config, results, report_dir, differential):
+def render_report(config, results, report_dir, differential, shallow=False):
     samples = config["samples"]
     condition_counts = {}
     for entry in samples.values():
@@ -87,26 +87,32 @@ def render_report(config, results, report_dir, differential):
         ("QC", "qc/library_complexity.tsv", "Complexity and sequencing depth", True),
         ("QC", "qc/scaling_curves.tsv", "Contact decay curve", True),
         ("QC", "qc/contact_map_correlation_1Mb.tsv", "Inter-sample correlation", True),
-        ("Matrices", "mcool/{sample}.mcool", "Multi-resolution contact matrix", True),
-        ("Structure", "reproducibility/hicrep_SCC_matrix.tsv", "HiCRep SCC", len(samples) > 1),
+        ("Matrices", f"qc/matrices/{{sample}}.{config['qc']['qc_map_resolution']}.cool" if shallow else "mcool/{sample}.mcool", "Raw pilot QC matrix" if shallow else "Multi-resolution contact matrix", True),
+        ("Structure", "reproducibility/hicrep_SCC_matrix.tsv", "HiCRep SCC", len(samples) > 1 and not shallow),
         ("Structure", "structural/compartments_clone_effects.tsv.gz", "Compartment comparison", differential),
         ("Structure", "structural/insulation_clone_effects.tsv.gz", "Insulation comparison", differential),
+        ("Structure", "structural/compartment_switch_summary.tsv", "Replicate-concordant E1 switches", differential),
+        ("Structure", "structural/compartment_switches.tsv.gz", "E1 switch genomic coordinates", differential),
+        ("Structure", "structural/boundary_events_summary.tsv", "Replicate-concordant boundary event summary", differential),
+        ("Structure", "structural/boundary_events.tsv.gz", "Boundary event genomic coordinates", differential),
         ("Contacts", "contacts/differential_contacts50_summary.tsv", "Differential contact summary", differential),
         ("Loops", f"loops_mustache/{config['loops']['primary_resolution']}/differential_loop_summary.tsv", "Differential loop summary", differential),
         ("Methods", "report/MicroC_methods_paper.txt", "Paper-ready methods", True),
         ("Provenance", "provenance/software_versions.tsv", "Resolved software versions", True),
         ("Provenance", "provenance/resolved_config.yaml", "Resolved configuration", True),
         ("Provenance", "provenance/mcool_50kb_pixel_equivalence.tsv", "Full 50-kb raw-pixel equivalence for adopted legacy matrices",
-         bool(config.get("contact_maps", {}).get("reuse_verified_existing_mcools", False))),
+         bool(config.get("contact_maps", {}).get("reuse_verified_existing_mcools", False)) and not shallow),
     ]
     # Convenient links to canonical machine-readable results. These optional
     # artifacts do not block report creation if the relevant module is disabled.
     expected.extend([
         ("QC", "qc/scaling_curves.pdf", "Distance-decay plot", True),
         ("QC", "qc/library_complexity.pdf", "Complexity figure", True),
-        ("Structure", "structural/compartments/{sample}." + str(config['compartments']['primary_resolution']) + ".cis.vecs.tsv", "Per-sample E1", True),
-        ("Structure", "structural/insulation/{sample}." + str(config['boundaries']['resolution']) + "." + str(config['boundaries']['primary_window']) + ".tsv", "Per-sample insulation", True),
+        ("Structure", "structural/compartments/{sample}." + str(config['compartments']['primary_resolution']) + ".cis.vecs.tsv", "Per-sample E1", not shallow),
+        ("Structure", "structural/insulation/{sample}." + str(config['boundaries']['resolution']) + "." + str(config['boundaries']['primary_window']) + ".tsv", "Per-sample insulation", not shallow),
         ("Contacts", "contacts/differential_contacts50_all.tsv.gz", "All tested differential contacts", differential),
+        ("Contacts", "report/focal_contacts.pdf", "Focal contact CPM validation panels", differential),
+        ("Loops", "report/focal_loops.pdf", "Focal loop CPM validation panels", differential),
         ("Contacts", "contacts/differential_contacts50_core.tsv", "High-confidence contact candidates", differential),
         ("Contacts", "contacts/contact50_prefilter_summary.tsv", "Distance and count prefilter summary", differential),
         ("Contacts", "contacts/EXP_independent_contacts50_volcano.pdf", "Contact volcano plot", differential),
@@ -119,7 +125,9 @@ def render_report(config, results, report_dir, differential):
         paths = [pattern.format(sample=s) for s in samples] if "{sample}" in pattern else [pattern]
         for rp in paths:
             filepath = results / rp
-            state = "ready" if filepath.is_file() and filepath.stat().st_size > 0 else ("missing" if required else "not-applicable")
+            state = ("not-applicable" if shallow and group in ("Structure", "Contacts", "Loops")
+                     else "ready" if filepath.is_file() and filepath.stat().st_size > 0
+                     else ("missing" if required else "not-applicable"))
             index.append({"module": group, "description": desc, "status": state, "path": str(filepath) if state == "ready" else rp})
     missing = [x for x in index if x["status"] == "missing"]
     if missing:
@@ -140,12 +148,14 @@ def render_report(config, results, report_dir, differential):
         return html_table([{"metric": k, "value": v} for k, v in rows.items()])
 
     qc = load_table(results / "qc/qc_summary.tsv")
-    qc_cols = [x for x in ["sample", "condition", "total_read_pairs", "no_dup_read_pairs", "mapped_pct_total", "duplicates_pct_total", "cis_ge_1kb_pct_nodup", "dovetail_deep_qc_pass"] if x in qc[0]] if qc else []
+    qc_cols = [x for x in ["sample", "condition", "total_read_pairs", "no_dup_read_pairs", "mapped_pct_total", "duplicates_pct_total", "cis_ge_1kb_pct_nodup", "shallow_screening_status" if shallow else "dovetail_deep_qc_pass"] if x in qc[0]] if qc else []
     for row in qc:
         summary.append({"section": "QC", "metric": f"{row['sample']}.no_dup_read_pairs", "value": str(row.get('no_dup_read_pairs', ''))})
         summary.append({"section": "QC", "metric": f"{row['sample']}.deep_qc_pass", "value": str(row.get('dovetail_deep_qc_pass', ''))})
+        if shallow:
+            summary.append({"section": "QC", "metric": f"{row['sample']}.shallow_screening_status", "value": str(row.get('shallow_screening_status', ''))})
     sections.append("<section id='quality'><h2>1. Read-pair quality control</h2>"
-                    "<p>These metrics are extracted from pairtools statistics. A failed QC threshold is shown as measured, not masked.</p>"
+                    + ("<p><strong>SHALLOW PILOT:</strong> these data screen mapping, ligation and complexity only. A screen-pass is not a deep sequencing pass, and library-complexity projections are uncertain extrapolations.</p>" if shallow else "<p>These metrics are extracted from pairtools statistics. A failed QC threshold is shown as measured, not masked.</p>")
                     + html_table(qc, qc_cols)
                     + artifact("qc/qc_summary.pdf", "Full QC plots (PDF)", preview=True)
                     + artifact("qc/library_complexity.pdf", "Library-complexity estimates (PDF)", preview=False)
@@ -153,40 +163,55 @@ def render_report(config, results, report_dir, differential):
                     + artifact("qc/contact_maps_1Mb.pdf", "One-megabase contact maps (PDF)", preview=False)
                     + artifact("qc/contact_map_correlation_1Mb.pdf", "Inter-sample contact map correlation (PDF)", preview=False)
                     + "</section>")
-    sections.append("<section id='structure'><h2>2. Reproducibility and 3D structure</h2>"
+    if not shallow:
+        sections.append("<section id='structure'><h2>2. Reproducibility and 3D structure</h2>"
                     "<p>Contact matrices, HiCRep, A/B compartments and insulation were evaluated as separate structural layers.</p>")
-    rep = results / "reproducibility/hicrep_SCC_matrix.tsv"
-    if rep.is_file() and len(samples) > 1:
-        sections.append("<h3>HiCRep SCC</h3>" + html_table(load_table(rep)))
+    if not shallow:
+        rep = results / "reproducibility/hicrep_SCC_matrix.tsv"
+        if rep.is_file() and len(samples) > 1:
+            sections.append("<h3>HiCRep SCC</h3>" + html_table(load_table(rep)))
+        else:
+            sections.append("<p>HiCRep not applicable for a single sample.</p>")
+        if differential:
+            sections.append("<h3>Descriptive compartment and insulation effects</h3>"
+                            "<p>Direction concordance of E1 and insulation-score differences across test samples. These counts are not statistical discoveries, compartment switches or boundary-gain calls.</p>")
+            for label, rel in (("A/B E1", "structural/compartments_clone_effects.tsv.gz"),
+                               ("Insulation", "structural/insulation_clone_effects.tsv.gz")):
+                counts = structural_direction_summary(results / rel)
+                for key, value in counts.items():
+                    summary.append({"section": label, "metric": key, "value": value})
+                sections.append("<h3>" + esc(label) + "</h3>"
+                                + html_table([{"metric": k, "value": v} for k, v in counts.items()]))
+            sections.append("<h3>Strict descriptive E1 sign switches</h3>"
+                            + metric_summary("structural/compartment_switch_summary.tsv", "E1 switches")
+                            + artifact("structural/compartment_switches.pdf", "E1 switch counts (PDF)", preview=True)
+                            + artifact("structural/compartment_switches.tsv.gz", "Coordinates and per-sample E1 (TSV.GZ)")
+                            + "<h3>Insulation boundary presence/absence</h3>"
+                            + metric_summary("structural/boundary_events_summary.tsv", "Boundary events")
+                            + artifact("structural/boundary_events.pdf", "Boundary event counts (PDF)", preview=True)
+                            + artifact("structural/boundary_events.tsv.gz", "Boundary event coordinates (TSV.GZ)")
+                            + "<p>Concordance and boundary labels are descriptive, not FDR-significant differential calls.</p>")
+        sections.append("</section>")
+        if differential:
+            sections.append("<section id='differential'><h2>3. Differential interactions</h2>"
+                            "<p><strong>Statistical caution:</strong> sample count and independent biological replication limit power. Differential calls depend on filtering and normalization."
+                            " Chromatin loop contact counts must not be treated as direct proof of focal loop formation or loss.</p>"
+                            "<h3>Contacts at configured resolution</h3>"
+                            + metric_summary("contacts/differential_contacts50_summary.tsv", "Differential contacts")
+                            + artifact("contacts/EXP_independent_contacts50_volcano.pdf", "Differential contacts volcano (PDF)", preview=True)
+                            + artifact("report/focal_contacts.pdf", "Significant contact candidate: normalized CPM per sample (PDF)", preview=True)
+                            + artifact("contacts/contact50_prefilter_summary.tsv", "Condition-blind contact prefilter table")
+                            + "<h3>Mustache pooled loops</h3>"
+                            + metric_summary(f"loops_mustache/{config['loops']['primary_resolution']}/differential_loop_summary.tsv", "Differential loops")
+                            + artifact(f"loops_mustache/{config['loops']['primary_resolution']}/EXP_differential_loops_volcano.pdf", "Differential loops volcano (PDF)")
+                            + artifact(f"loops_mustache/{config['loops']['primary_resolution']}/EXP_differential_loops_QC.pdf", "Differential loops QC (PDF)", preview=True)
+                            + artifact("report/focal_loops.pdf", "Concordant loop candidate: normalized CPM per sample (PDF)", preview=True)
+                            + artifact(f"loops_mustache/{config['loops']['primary_resolution']}/MicroC_loop_analysis_report.html", "Detailed loop report (HTML)")
+                            + "</section>")
+        else:
+            sections.append("<section id='differential'><h2>3. Differential interactions</h2><p><strong>Not run:</strong> fewer than two samples per group, or differential analysis was disabled in the configuration. This run still provides QC and per-sample structural results.</p></section>")
     else:
-        sections.append("<p>HiCRep not applicable for a single sample.</p>")
-    if differential:
-        sections.append("<h3>Descriptive compartment and insulation effects</h3>"
-                        "<p>Direction concordance of E1 and insulation-score differences across test samples. These counts are not statistical discoveries, compartment switches or boundary-gain calls.</p>")
-        for label, rel in (("A/B E1", "structural/compartments_clone_effects.tsv.gz"),
-                           ("Insulation", "structural/insulation_clone_effects.tsv.gz")):
-            counts = structural_direction_summary(results / rel)
-            for key, value in counts.items():
-                summary.append({"section": label, "metric": key, "value": value})
-            sections.append("<h3>" + esc(label) + "</h3>"
-                            + html_table([{"metric": k, "value": v} for k, v in counts.items()]))
-    sections.append("</section>")
-    if differential:
-        sections.append("<section id='differential'><h2>3. Differential interactions</h2>"
-                        "<p><strong>Statistical caution:</strong> sample count and independent biological replication limit power. Differential calls depend on filtering and normalization."
-                        " Chromatin loop contact counts must not be treated as direct proof of focal loop formation or loss.</p>"
-                        "<h3>Contacts at configured resolution</h3>"
-                        + metric_summary("contacts/differential_contacts50_summary.tsv", "Differential contacts")
-                        + artifact("contacts/EXP_independent_contacts50_volcano.pdf", "Differential contacts volcano (PDF)", preview=True)
-                        + artifact("contacts/contact50_prefilter_summary.tsv", "Condition-blind contact prefilter table")
-                        + "<h3>Mustache pooled loops</h3>"
-                        + metric_summary(f"loops_mustache/{config['loops']['primary_resolution']}/differential_loop_summary.tsv", "Differential loops")
-                        + artifact(f"loops_mustache/{config['loops']['primary_resolution']}/EXP_differential_loops_volcano.pdf", "Differential loops volcano (PDF)")
-                        + artifact(f"loops_mustache/{config['loops']['primary_resolution']}/EXP_differential_loops_QC.pdf", "Differential loops QC (PDF)", preview=True)
-                        + artifact(f"loops_mustache/{config['loops']['primary_resolution']}/MicroC_loop_analysis_report.html", "Detailed loop report (HTML)")
-                        + "</section>")
-    else:
-        sections.append("<section id='differential'><h2>3. Differential interactions</h2><p><strong>Not run:</strong> fewer than two samples per group, or differential analysis was disabled in the configuration. This run still provides QC and per-sample structural results.</p></section>")
+        sections.append("<section id='structure'><h2>2. Structural and differential analysis</h2><p>Not run in shallow-sequencing QC mode; no deep structural conclusions are claimed.</p></section>")
     methods = read_text(results / "report/MicroC_methods_paper.txt")
     sections.append("<section id='methods'><h2>4. Methods</h2><p>Automatically generated from the resolved experiment configuration and the completed workflow targets. Verify wording before manuscript submission.</p>"
                     "<pre class='methods'>" + esc(methods) + "</pre>"
@@ -204,14 +229,14 @@ def render_report(config, results, report_dir, differential):
             rows.append("<tr>" + "".join(f"<td>{esc(str(item[key]))}</td>" for key in ("module", "description", "status")) + f"<td>{cell}</td></tr>")
         return "<div class='table-scroll'><table>" + header + "<tbody>" + "".join(rows) + "</tbody></table></div>"
 
-    if config.get("contact_maps", {}).get("reuse_verified_existing_mcools", False):
+    if config.get("contact_maps", {}).get("reuse_verified_existing_mcools", False) and not shallow:
         summary.append({"section": "Provenance", "metric": "mcool_matrix_origin", "value": "audited-existing"})
         adoption_note = ("<p><strong>Audited legacy matrices:</strong> existing .mcool files were retained "
                          "following a complete raw-pixel comparison at 50 kb against independently "
                          "aggregated 10-kb coolers. Other resolutions and balancing weights were "
                          "not independently certified by that comparison.</p>")
     else:
-        summary.append({"section": "Provenance", "metric": "mcool_matrix_origin", "value": "workflow-generated"})
+        summary.append({"section": "Provenance", "metric": "mcool_matrix_origin", "value": "shallow_raw_qc_cool" if shallow else "workflow-generated"})
         adoption_note = ""
     sections.append("<section id='files'><h2>5. Canonical outputs and software</h2>"
                     "<p>Primary scientific results remain in structured TSV/TSV.GZ and cooler files. This index points to canonical outputs, not exploratory backups.</p>"
@@ -219,7 +244,9 @@ def render_report(config, results, report_dir, differential):
                     + artifact("provenance/software_versions.tsv", "Software versions (TSV)")
                     + artifact("provenance/resolved_config.yaml", "Resolved configuration (YAML)")
                     + "</section>")
-    report_title = "SnakeMicroC | experiment report"
+    if shallow:
+        summary.append({"section": "Scope", "metric": "analysis_mode", "value": "shallow_qc"})
+    report_title = "SnakeMicroC | shallow pilot QC report" if shallow else "SnakeMicroC | experiment report"
     style = """
     :root{font-family:Inter,system-ui,-apple-system,sans-serif;color:#162337;background:#f5f7fa}
     body{max-width:1120px;margin:0 auto;padding:36px 24px;line-height:1.55}
@@ -241,8 +268,9 @@ def render_report(config, results, report_dir, differential):
         ("methods", "Methods"), ("files", "Files")]) + "</nav>"
     heading = (f"<header><h1>{esc(report_title)}</h1><p class='lead'>{len(samples)} samples · {esc(sample_label)}</p>"
                f"<div class='card'><strong>Comparison:</strong> {esc((test + ' versus ' + ctrl) if differential else 'not applicable')}"
-               f"<p>Reference: {esc(str(config['reference']['assembly']))} · primary loops: {esc(str(config['loops']['primary_resolution']))} bp"
-               f" · contacts: {esc(str(config['contacts']['resolution']))} bp</p></div></header>")
+               + (f"<p>Reference: {esc(str(config['reference']['assembly']))} · shallow QC maps: {config['qc']['qc_map_resolution']} bp · no loop/contact differential testing</p>" if shallow
+                  else f"<p>Reference: {esc(str(config['reference']['assembly']))} · primary loops: {esc(str(config['loops']['primary_resolution']))} bp · contacts: {esc(str(config['contacts']['resolution']))} bp</p>")
+               + "</div></header>")
     html_doc = ("<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
                 f"<title>{esc(report_title)}</title><style>{style}</style></head><body>"
                 + heading + index_html + "\n".join(sections)
@@ -256,12 +284,14 @@ def main():
     parser.add_argument("--results", required=True)
     parser.add_argument("--report-dir", required=True)
     parser.add_argument("--differential", choices=("yes", "no"), required=True)
+    parser.add_argument("--shallow-qc", action="store_true")
     args = parser.parse_args()
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf8"))
     results = Path(args.results).resolve()
     report_dir = Path(args.report_dir).resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
-    html_text, summary, index, conditions = render_report(cfg, results, report_dir, args.differential == "yes")
+    html_text, summary, index, conditions = render_report(cfg, results, report_dir,
+                                                           args.differential == "yes", shallow=args.shallow_qc)
     (report_dir / "MicroC_report.html").write_text(html_text, encoding="utf8")
     for name, rows, cols in [
         ("MicroC_summary.tsv", summary, ("section", "metric", "value")),

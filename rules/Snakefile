@@ -46,7 +46,14 @@ from verified_mcool import verify_existing_mcools
 
 # Opt-in adoption is restricted to legacy experiments with verified 50-kb
 # pixel-equivalence evidence. The default for new datasets is full processing.
+ANALYSIS_MODE = config.get("analysis", {}).get("mode", "full")
+SHALLOW_QC = ANALYSIS_MODE == "shallow_qc"
+if ANALYSIS_MODE not in ("full", "shallow_qc"):
+    raise ValueError(f"Unknown analysis.mode: {ANALYSIS_MODE}")
+
 REUSE_VERIFIED_MCOOLS = bool(config.get("contact_maps", {}).get("reuse_verified_existing_mcools", False))
+if SHALLOW_QC and REUSE_VERIFIED_MCOOLS:
+    raise ValueError("shallow_qc must not adopt existing deep-sequencing matrices")
 if REUSE_VERIFIED_MCOOLS:
     verify_existing_mcools(config, os.getcwd())
 
@@ -110,7 +117,8 @@ TEST_SAMPLES = [
 # library. A comparison requires >=2 samples in each group. This guard is
 # used for DAG selection, not to assert statistical independence of clones.
 DIFFERENTIAL_ENABLED = (
-    bool(config.get("analysis", {}).get("differential", True))
+    not SHALLOW_QC
+    and bool(config.get("analysis", {}).get("differential", True))
     and len(CONTROL_SAMPLES) >= 2
     and len(TEST_SAMPLES) >= 2
 )
@@ -131,8 +139,16 @@ BASE_RES = int(config["contact_maps"]["base_resolution"])
 ZOOM_RES = [int(x) for x in config["contact_maps"]["resolutions"]]
 ZOOM_RES_CSV = ",".join(str(x) for x in ZOOM_RES)
 QC_RES = int(config["qc"]["qc_map_resolution"])
+# Shallow pilots create only raw 1-Mb QC matrices, with no genome-wide
+# deep-sequencing balancing/zoomification. These maps are QC-only.
+SHALLOW_COOL = f"{RESULTS}/qc/matrices/{{sample}}.{QC_RES}.cool"
+QC_MAP_INPUTS = (
+    expand(SHALLOW_COOL, sample=SAMPLES) if SHALLOW_QC
+    else expand(MCOOL, sample=SAMPLES)
+)
 QC_MCOOL_URIS = " ".join(
-    f"{RESULTS}/mcool/{sample}.mcool::/resolutions/{QC_RES}"
+    f"{RESULTS}/qc/matrices/{sample}.{QC_RES}.cool" if SHALLOW_QC
+    else f"{RESULTS}/mcool/{sample}.mcool::/resolutions/{QC_RES}"
     for sample in SAMPLES
 )
 COMP_RES = int(config["compartments"]["primary_resolution"])
@@ -181,7 +197,9 @@ ANALYSIS_TARGETS = (
     + expand(f"{RESULTS}/structural/compartments/{{sample}}.{COMP_RES}.cis.vecs.tsv", sample=SAMPLES)
     + expand(f"{RESULTS}/structural/insulation/{{sample}}.{INS_RES}.{INS_WIN}.tsv", sample=SAMPLES)
 )
-if len(SAMPLES) >= 2:
+if SHALLOW_QC:
+    ANALYSIS_TARGETS = []
+if not SHALLOW_QC and len(SAMPLES) >= 2:
     ANALYSIS_TARGETS += [
         f"{RESULTS}/reproducibility/hicrep_SCC_long.tsv",
         f"{RESULTS}/reproducibility/hicrep_SCC_matrix.tsv",
@@ -198,6 +216,14 @@ if DIFFERENTIAL_ENABLED:
         f"{LOOPS_DIR}/differential_loop_summary.tsv",
         f"{LOOPS_DIR}/MicroC_loop_analysis_report.html",
         f"{LOOPS_DIR}/MicroC_loop_analysis_report.md",
+        f"{RESULTS}/structural/compartment_switches.tsv.gz",
+        f"{RESULTS}/structural/compartment_switch_summary.tsv",
+        f"{RESULTS}/structural/compartment_switches.pdf",
+        f"{RESULTS}/structural/boundary_events.tsv.gz",
+        f"{RESULTS}/structural/boundary_events_summary.tsv",
+        f"{RESULTS}/structural/boundary_events.pdf",
+        f"{RESULTS}/report/focal_contacts.pdf",
+        f"{RESULTS}/report/focal_loops.pdf",
     ]
 
 
@@ -353,6 +379,7 @@ rule summarize_qc:
         samples=" ".join(SAMPLES),
         conditions=" ".join(CONDITIONS),
         min_nodup=float(config["qc"]["deep_min_nodup_pairs"]),
+        mode_flag="--shallow-qc" if SHALLOW_QC else "",
         min_cis=float(config["qc"]["min_cis_ge_1kb_fraction"]),
         recommended=float(config["qc"]["recommended_total_pairs"])
     shell:
@@ -360,6 +387,7 @@ rule summarize_qc:
         set -euo pipefail
         mkdir -p {RESULTS}/qc
         python {SCRIPTS}/summarize_qc.py \
+          {params.mode_flag} \
           --stats {input.stats} \
           --samples {params.samples} \
           --conditions {params.conditions} \
@@ -396,22 +424,47 @@ rule plot_scaling:
         """
 
 
+if SHALLOW_QC:
+    rule shallow_qc_map:
+        input:
+            pairs=PAIR,
+            chroms=CHROMSIZES
+        output:
+            SHALLOW_COOL
+        conda:
+            DOWNSTREAM_ENV
+        params:
+            res=QC_RES,
+            assembly=config["reference"]["assembly"]
+        shell:
+            r"""
+            set -euo pipefail
+            mkdir -p "$(dirname {output})"
+            cooler cload pairs \
+              --assembly {params.assembly} \
+              -c1 2 -p1 3 -c2 4 -p2 5 \
+              {input.chroms}:{params.res} {input.pairs} {output}
+            """
+
+
 # The .mcool already contains the QC resolution. Consume its URI directly,
 # instead of building and rebalancing a separate per-sample 1-Mb .cool.
 rule plot_qc_contact_maps:
     input:
-        expand(MCOOL, sample=SAMPLES)
+        QC_MAP_INPUTS
     output:
         f"{RESULTS}/qc/contact_maps_1Mb.pdf"
     conda:
         DOWNSTREAM_ENV
     params:
         samples=" ".join(SAMPLES),
-        cool_uris=QC_MCOOL_URIS
+        cool_uris=QC_MCOOL_URIS,
+        unbalanced="--unbalanced" if SHALLOW_QC else ""
     shell:
         r"""
         set -euo pipefail
         python {SCRIPTS}/plot_contact_maps_multisample.py \
+          {params.unbalanced} \
           --cools {params.cool_uris} \
           --samples {params.samples} \
           --out-pdf {output}
@@ -420,7 +473,7 @@ rule plot_qc_contact_maps:
 
 rule qc_correlation:
     input:
-        expand(MCOOL, sample=SAMPLES)
+        QC_MAP_INPUTS
     output:
         tsv=f"{RESULTS}/qc/contact_map_correlation_1Mb.tsv",
         pdf=f"{RESULTS}/qc/contact_map_correlation_1Mb.pdf"
@@ -428,11 +481,13 @@ rule qc_correlation:
         DOWNSTREAM_ENV
     params:
         samples=" ".join(SAMPLES),
-        cool_uris=QC_MCOOL_URIS
+        cool_uris=QC_MCOOL_URIS,
+        unbalanced="--unbalanced" if SHALLOW_QC else ""
     shell:
         r"""
         set -euo pipefail
         python {SCRIPTS}/plot_sample_correlation.py \
+          {params.unbalanced} \
           --cools {params.cool_uris} \
           --samples {params.samples} \
           --out-tsv {output.tsv} \
@@ -1086,6 +1141,65 @@ rule loop_report:
 
 
 
+if DIFFERENTIAL_ENABLED:
+    rule structural_diagnostics:
+        input:
+            e1=f"{RESULTS}/structural/compartments_clone_effects.tsv.gz",
+            insulation=expand(f"{RESULTS}/structural/insulation/{{sample}}.{INS_RES}.{INS_WIN}.tsv", sample=SAMPLES)
+        output:
+            switches=f"{RESULTS}/structural/compartment_switches.tsv.gz",
+            switch_summary=f"{RESULTS}/structural/compartment_switch_summary.tsv",
+            switch_pdf=f"{RESULTS}/structural/compartment_switches.pdf",
+            boundaries=f"{RESULTS}/structural/boundary_events.tsv.gz",
+            boundary_summary=f"{RESULTS}/structural/boundary_events_summary.tsv",
+            boundary_pdf=f"{RESULTS}/structural/boundary_events.pdf"
+        params:
+            samples=" ".join(SAMPLES),
+            ctrl=" ".join(CONTROL_SAMPLES),
+            test=" ".join(TEST_SAMPLES),
+            threshold=float(config["compartments"]["primary_min_abs_e1"]),
+            tolerance=int(config["boundaries"]["cluster_tolerance_bp"])
+        conda:
+            DOWNSTREAM_ENV
+        shell:
+            r"""
+            set -euo pipefail
+            python {SCRIPTS}/structural_diagnostics.py \
+              --e1-summary {input.e1} \
+              --insulation {input.insulation} \
+              --samples {params.samples} \
+              --control-samples {params.ctrl} \
+              --test-samples {params.test} \
+              --e1-threshold {params.threshold} \
+              --insulation-window {INS_WIN} \
+              --tolerance {params.tolerance} \
+              --outdir {RESULTS}/structural
+            """
+
+    rule focal_candidate_figures:
+        input:
+            contacts=f"{RESULTS}/contacts/differential_contacts50_core.tsv",
+            loops=f"{LOOPS_DIR}/differential_loops_core.tsv"
+        output:
+            contacts=f"{RESULTS}/report/focal_contacts.pdf",
+            loops=f"{RESULTS}/report/focal_loops.pdf"
+        params:
+            samples=" ".join(SAMPLES)
+        conda:
+            DOWNSTREAM_ENV
+        shell:
+            r"""
+            set -euo pipefail
+            mkdir -p {RESULTS}/report
+            python {SCRIPTS}/focal_candidate_plots.py \
+              --contacts {input.contacts} \
+              --loops {input.loops} \
+              --samples {params.samples} \
+              --out-contacts {output.contacts} \
+              --out-loops {output.loops}
+            """
+
+
 rule methods_config:
     output:
         f"{RESULTS}/provenance/methods_resolved_config.yaml"
@@ -1117,7 +1231,7 @@ rule methods_report:
     conda:
         METHODS_ENV
     params:
-        compare_flag="" if DIFFERENTIAL_ENABLED else "--no-differential"
+        compare_flag="--qc-only" if SHALLOW_QC else ("" if DIFFERENTIAL_ENABLED else "--no-differential")
     shell:
         r"""
         set -euo pipefail
@@ -1226,14 +1340,14 @@ rule provenance:
     input:
         processing=f"{RESULTS}/provenance/processing_versions.tsv",
         downstream=f"{RESULTS}/provenance/downstream_versions.tsv",
-        r=f"{RESULTS}/provenance/r_versions.tsv",
+        r=[] if SHALLOW_QC else f"{RESULTS}/provenance/r_versions.tsv",
         methods_config=rules.methods_config.output
     output:
         config=f"{RESULTS}/provenance/resolved_config.yaml",
         versions=f"{RESULTS}/provenance/software_versions.tsv",
         summary=f"{RESULTS}/provenance/run_summary.tsv"
     conda:
-        DOWNSTREAM_ENV
+        PROCESSING_ENV if SHALLOW_QC else DOWNSTREAM_ENV
     script:
         f"{SCRIPTS}/write_provenance.py"
 
@@ -1251,7 +1365,8 @@ rule report:
     conda:
         METHODS_ENV
     params:
-        comparison="yes" if DIFFERENTIAL_ENABLED else "no"
+        comparison="yes" if DIFFERENTIAL_ENABLED else "no",
+        qc_mode="--shallow-qc" if SHALLOW_QC else ""
     shell:
         r"""
         set -euo pipefail
@@ -1259,7 +1374,8 @@ rule report:
           --config {RESULTS}/provenance/methods_resolved_config.yaml \
           --results {RESULTS} \
           --report-dir {RESULTS}/report \
-          --differential {params.comparison}
+          --differential {params.comparison} \
+          {params.qc_mode}
         """
 
 

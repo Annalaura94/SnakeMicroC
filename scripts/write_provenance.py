@@ -28,11 +28,11 @@ config_out.parent.mkdir(parents=True, exist_ok=True)
 with config_out.open("w") as handle:
     yaml.safe_dump(dict(snakemake.config), handle, sort_keys=False)
 
-version_tables = [
-    pd.read_csv(snakemake.input.processing, sep="\t"),
-    pd.read_csv(snakemake.input.downstream, sep="\t"),
-    pd.read_csv(snakemake.input.r, sep="\t"),
-]
+version_tables = [pd.read_csv(snakemake.input.processing, sep="\t")]
+for optional in ("downstream", "r"):
+    path = getattr(snakemake.input, optional, None)
+    if path and isinstance(path, str) and Path(path).is_file():
+        version_tables.append(pd.read_csv(path, sep="\t"))
 
 pd.concat(version_tables, ignore_index=True).to_csv(
     versions_out,

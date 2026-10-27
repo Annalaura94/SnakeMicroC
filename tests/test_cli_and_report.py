@@ -155,9 +155,19 @@ class ReportTests(unittest.TestCase):
                 p = results / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_bytes(b"synthetic")
+            write_tsv(results / "structural/compartment_switch_summary.tsv", [
+                {"metric":"evaluated_bins", "value":100}, {"metric":"strict_A_to_B", "value":2}])
+            write_tsv(results / "structural/boundary_events_summary.tsv", [
+                {"metric":"gain_in_test", "value":3}, {"metric":"loss_in_test", "value":1}])
+            for rel in ("structural/compartment_switches.tsv.gz",
+                        "structural/boundary_events.tsv.gz", "report/focal_contacts.pdf",
+                        "report/focal_loops.pdf"):
+                p = results / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(b"synthetic output")
             write_tsv(results / "contacts/differential_contacts50_summary.tsv", [{"metric":"tested_after_filter", "value":122}, {"metric":"FDR_significant","value":4}])
             write_tsv(results / "loops_mustache/10000/differential_loop_summary.tsv", [{"metric":"condition_blind_candidates", "value":9535}, {"metric":"FDR_significant","value":1}])
-        (results / "report").mkdir(parents=True)
+        (results / "report").mkdir(parents=True, exist_ok=True)
         (results / "report/MicroC_methods_paper.txt").write_text("This is a synthetic METHODS section.")
         (results / "provenance").mkdir(parents=True)
         write_tsv(results / "provenance/software_versions.tsv", [{"tool":"python", "version":"3"}])

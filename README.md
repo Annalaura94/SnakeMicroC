@@ -117,3 +117,47 @@ validation. For MIAT-specific instructions see `docs/MIAT_MIGRATION.md`.
 code, parameters and Conda environment provenance. For a carefully audited
 legacy migration only, `code-and-params` deliberately excludes timestamps.
 This option must never be used to ignore unverified changed source data.
+
+
+## Shallow-sequencing pilot QC (batch2 or any new sequencing batch)
+
+The optional `analysis.mode: shallow_qc` runs mapping, deduplication, pairtools
+statistics, P(s), occupancy-model library-complexity screening, and **raw,
+unbalanced 1-Mb** QC maps. It does **not** execute deep multi-resolution
+matrix balancing, HiCRep, E1, insulation, Mustache or differential testing.
+It generates `results/report/MicroC_report.html` and both Methods outputs.
+A screening pass is **not** a deep library QC pass. Sparse shallow contact-map
+correlations and long-range complexity extrapolations are descriptive only.
+
+Create a **separate** workspace from an existing validated config and a FASTQ
+directory with unambiguously matched R1/R2 reads. Duplicate mates (e.g.,
+multiple lanes) and incomplete pairs are rejected instead of silently merged.
+
+```bash
+SRC=/home/reference_data/pipelines/SnakeMicroC
+BATCH2=/mnt/nvme_raid0/epigen/Maldotti_neurolncRNA/MicroC/workspaces/batch2_shallow
+python "$SRC/scripts/init_shallow_qc.py" \
+  --base-config /mnt/nvme_raid0/epigen/Maldotti_neurolncRNA/MicroC/workspaces/v1/config_mustache_v1.yaml \
+  --fastq-dir /path/to/batch2_FASTQs \
+  --workspace "$BATCH2"
+"$SRC/bin/microc" validate --config "$BATCH2/config_shallow_qc.yaml" --check-paths
+"$SRC/bin/microc" qc --config "$BATCH2/config_shallow_qc.yaml" \
+  --workdir "$BATCH2" --cores 16 --snakemake /home/atamburr/.conda/envs/3plex/bin/snakemake \
+  --conda-prefix /mnt/nvme_raid0/tmp/atamburr_microc_snakemake_conda --dry-run
+```
+
+Remove `--dry-run` only after reviewing the sample-to-FASTQ mapping and DAG.
+The QC-only command automatically includes its report and Methods; it does
+not process batch1 data. A change in FASTQ source layout, read depth, or
+sequencing run always requires a new workspace and explicit provenance.
+
+## Added full-depth report diagnostics
+
+For adequately replicated group comparisons, the integrated report now adds
+strict descriptive E1 A/B sign switches (all control samples versus all test
+samples, each above the configured absolute E1 threshold); insulation boundary
+presence/absence clusters using the configured tolerance; and normalized-CPM
+figures for the top core differential contact and loop candidates. These are
+**descriptive** diagnostics, not extra statistical differential tests. They
+must not be used to infer formation/loss of a loop or domain without
+independent corroboration. The report links the coordinate tables and figures.

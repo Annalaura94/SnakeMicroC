@@ -31,3 +31,16 @@
   The original headerless BED4 view remains unchanged for cooltools and other consumers.
 - Add strict validation, atomic generation, and three regression checks.
 - Run pairtools in the Snakemake conda environment without user-site Python packages.
+
+
+### Full-report diagnostics and shallow-pilot QC profile (27 October 2026)
+- Explicit `analysis.mode: full|shallow_qc`, default full (backwards compatible).
+- Shallow pilot: QC-only raw 1-Mb coolers, mapping/dedup metrics, P(s),
+  library complexity, correlations, honest mode-specific Methods and HTML;
+  never applies deep-yield PASS/FAIL or executes deep biological analyses.
+- FASTQ discovery is pair-safe and refuses ambiguous multiple lanes.
+- Full report: strict concordant A/B sign-switch bins, replicate-supported
+  boundary clusters, CPM candidate plots, linkable tables and figures.
+- Fix contact-map PDF colorbar layout and label unbalanced exploratory QC.
+- Synthetic regression tests; real Snakemake/Conda full runtime validation
+  is still required on the laboratory server.

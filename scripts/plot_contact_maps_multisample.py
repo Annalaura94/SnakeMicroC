@@ -32,7 +32,7 @@ def main():
     n = len(mats)
     ncols = 2
     nrows = math.ceil(n / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(11, 5.2 * nrows))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(11.5, 5.2 * nrows), constrained_layout=True)
     axes = np.atleast_1d(axes).ravel()
     for ax, mat, sample in zip(axes, mats, args.samples):
         vis = np.log10(mat + 1)
@@ -44,8 +44,7 @@ def main():
     for ax in axes[n:]:
         ax.axis('off')
     fig.colorbar(im, ax=axes[:n].tolist(), shrink=0.7, label='log10(contact + 1)')
-    fig.suptitle('Genome-wide Micro-C contact maps - QC view')
-    fig.subplots_adjust(top=0.93, wspace=0.2, hspace=0.25)
+    fig.suptitle('Micro-C QC maps (raw counts, shallow pilot)' if args.unbalanced else 'Genome-wide Micro-C contact maps - QC view')
     fig.savefig(args.out_pdf, bbox_inches='tight')
     plt.close(fig)
 

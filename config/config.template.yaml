@@ -37,6 +37,8 @@ reproducibility:
   hicrep_h: 1
   hicrep_max_distance: 5000000
 analysis:
+  # full: deep QC + structural/differential report. shallow_qc: pilot QC only.
+  mode: full
   # Run differential comparisons only with >=2 samples in each group.
   differential: true
   # Set true to stop if a requested differential comparison lacks replication.

@@ -69,7 +69,9 @@ def main(argv=None):
         p.error(str(exc))
     if adopted is not None:
         print(f"[SnakeMicroC] Audited legacy matrix adoption: {adopted}", flush=True)
-    target = {"qc": "qc", "run": "all", "report": "report"}[args.command]
+    # In shallow mode, qc must also generate its integrated report and Methods.
+    target = ("report" if args.command == "qc" and status["analysis_mode"] == "shallow_qc"
+              else {"qc": "qc", "run": "all", "report": "report"}[args.command])
     cmd = [snake, "--snakefile", str(ROOT / "Snakefile"), "--configfile", str(configfile), "--directory", str(workdir), "--cores", str(args.cores), "--use-conda", "--rerun-triggers"]
     triggers = {
         "mtime": ["mtime"],

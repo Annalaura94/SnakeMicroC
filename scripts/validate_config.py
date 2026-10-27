@@ -119,9 +119,21 @@ def load_and_validate(config_path, check_paths=False):
     if cfg["contacts"]["prefilter_min_nonzero_samples"] > len(samples):
         raise ConfigurationError("contacts.prefilter_min_nonzero_samples exceeds number of samples")
 
+    mode = (cfg.get("analysis") or {}).get("mode", "full")
+    if mode not in ("full", "shallow_qc"):
+        raise ConfigurationError("analysis.mode must be full or shallow_qc")
+    if mode == "shallow_qc" and cfg["qc"]["qc_map_resolution"] != 1000000:
+        raise ConfigurationError("shallow_qc currently requires qc.qc_map_resolution: 1000000")
+    if mode == "shallow_qc" and cfg.get("analysis", {}).get("differential", False):
+        raise ConfigurationError("shallow_qc requires analysis.differential: false")
+    if mode == "shallow_qc" and cfg.get("analysis", {}).get("require_differential", False):
+        raise ConfigurationError("shallow_qc requires analysis.require_differential: false")
+
     cm = cfg["contact_maps"]
     if not isinstance(cm.get("reuse_verified_existing_mcools", False), bool):
         raise ConfigurationError("contact_maps.reuse_verified_existing_mcools must be true/false")
+    if mode == "shallow_qc" and cm.get("reuse_verified_existing_mcools", False):
+        raise ConfigurationError("shallow_qc cannot reuse legacy deep matrices")
     if cm.get("reuse_verified_existing_mcools", False):
         if int(cfg["loops"]["primary_resolution"]) != 10000 or 50000 not in cmaps:
             raise ConfigurationError("Legacy 50-kb matrix adoption requires 10-kb loop coolers and 50-kb mcool resolution")
@@ -144,11 +156,14 @@ def load_and_validate(config_path, check_paths=False):
         raise ConfigurationError("analysis.require_differential is true but fewer than two samples per comparison group exist")
     return {
         "config": cfg,
+        "analysis_mode": mode,
         "samples": len(samples),
         "conditions": conditions,
         "comparison": f"{test} versus {ctrl}" if test and ctrl else "not configured",
         "differential_enabled": ready,
-        "message": "Differential analyses enabled" if ready else "QC and descriptive structure only (differential analyses skipped)",
+        "message": ("Shallow pilot: QC only, no structural inference" if mode == "shallow_qc"
+                    else "Differential analyses enabled" if ready
+                    else "QC and descriptive structure only (differential analyses skipped)"),
     }
 
 

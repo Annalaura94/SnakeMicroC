@@ -109,6 +109,8 @@ def sha256(path):
 def main():
     ap = argparse.ArgumentParser()
 
+    ap.add_argument("--qc-only", action="store_true",
+                    help="Document shallow pilot QC; do not claim deep analyses")
     ap.add_argument("--no-differential", action="store_true",
                     help="Document QC and descriptive analyses only")
 
@@ -256,6 +258,22 @@ def main():
         args.config
     )
 
+    if args.qc_only:
+        groups = ", ".join(f"{k} ({v['condition']})" for k, v in samples.items())
+        parts = [
+            ("Design and scope", f"Shallow-sequencing quality control was performed on {sample_count} Micro-C libraries: {groups}. Libraries were assessed using {seq_text}. These reads represent a pilot subsample and cannot establish deep-sequencing QC pass/fail, compartment changes, domain boundaries or differential chromatin interactions."),
+            ("Mapping and deduplication", f"Paired reads were aligned to {ref['assembly']} using BWA-MEM -5SP -T0, parsed with pairtools (MAPQ >= {processing['mapq']}, walks policy {processing['walks_policy']}, maximum inter-alignment gap {processing['max_inter_align_gap']} bp), sorted, deduplicated, and summarized using pairtools statistics."),
+            ("Pilot QC measurements", f"The pilot report summarizes mapping, duplicate rates, cis/trans partition, cis contacts >=1 kb, distance-decay P(s) and library-complexity extrapolation. A cis >=1 kb fraction of {qc['min_cis_ge_1kb_fraction']:.2f} was used as a screening flag, not as a definitive library acceptance threshold. Projected complexity under deeper sequencing is an occupancy-model estimate with substantial uncertainty at shallow depth."),
+            ("Exploratory QC maps", f"Raw, unbalanced contact matrices at {fmt_bp(qc['qc_map_resolution'])} resolution were generated directly from pairs and visualized for gross library QC only. Sample correlations were calculated from depth-scaled unbalanced maps. No deep multi-resolution matrix balancing, HiCRep, A/B-compartment calling, insulation analysis, Mustache calling or differential testing was performed in this QC-only run."),
+            ("Provenance", f"SnakeMicroC commit {commit} ({git_status}); configuration SHA256 {config_hash}. Software versions are recorded in the report provenance."),
+        ]
+        md = "# Shallow Micro-C QC - methods and provenance\n\n" + "\n\n".join(f"## {title}\n\n{body}" for title, body in parts) + "\n"
+        txt = "Shallow Micro-C QC methods\n\n" + "\n\n".join(body for _, body in parts) + "\n"
+        Path(args.output_md).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output_md).write_text(md, encoding="utf8")
+        Path(args.output_txt).write_text(txt, encoding="utf8")
+        return
+
     # --------------------------------------------------------
     # Methods text
     # --------------------------------------------------------
@@ -363,8 +381,10 @@ def main():
                 f"analysis was performed at "
                 f"{fmt_bp(compartments['primary_resolution'])} "
                 f"resolution and eigenvectors were phased using "
-                f"GC content. The primary absolute E1 threshold "
-                f"was {compartments['primary_min_abs_e1']}."
+                f"GC content. A configured absolute E1 threshold of "
+                f"{compartments['primary_min_abs_e1']} was applied to screen for "
+                f"strictly concordant sign switches (every control sample versus "
+                f"every test sample). Such calls are descriptive, not statistically differential."
             )
         )
     )
@@ -381,9 +401,10 @@ def main():
                 f"{fmt_bp(boundaries['primary_window'])}, and "
                 f"boundaries were identified using the "
                 f"{boundaries['threshold_method']} thresholding "
-                f"method. Boundary comparisons used a clustering "
-                f"tolerance of "
-                f"{fmt_bp(boundaries['cluster_tolerance_bp'])}."
+                f"method. Boundary positions were clustered with a tolerance "
+                f"of {fmt_bp(boundaries['cluster_tolerance_bp'])} and presence/absence "
+                f"was compared across all samples of each group. These calls are "
+                f"descriptive and are not FDR-significant differential-boundary tests."
             )
         )
     )

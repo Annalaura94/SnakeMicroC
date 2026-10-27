@@ -32,6 +32,8 @@ def get(stats, key):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument('--shallow-qc', action='store_true',
+                    help='Pilot screening only: do not apply deep-sequencing yield PASS/FAIL')
     ap.add_argument('--stats', nargs='+', required=True)
     ap.add_argument('--samples', nargs='+', required=True)
     ap.add_argument('--conditions', nargs='+', required=True)
@@ -66,6 +68,7 @@ def main():
         pass_nodup = nodup > args.min_nodup
         pass_cis1 = cis1_frac > args.min_cis1kb_frac
         qc_pass = bool(pass_nodup and pass_cis1)
+        shallow_screen = "SCREEN_PASS" if pass_cis1 else "REVIEW_CIS_FRACTION"
 
         rows.append({
             'sample': sample,
@@ -90,10 +93,12 @@ def main():
             'cis_ge_1kb_pct_nodup': 100 * cis1 / nodup if nodup else np.nan,
             'cis_ge_10kb_pct_nodup': 100 * cis10 / nodup if nodup else np.nan,
             'valid_pct_nodup': 100 * valid / nodup if nodup else np.nan,
-            'recommended_total_depth': total >= args.recommended_total,
-            'pass_nodup_pairs': pass_nodup,
+            'recommended_total_depth': 'NOT_EVALUATED' if args.shallow_qc else total >= args.recommended_total,
+            'pass_nodup_pairs': 'NOT_EVALUATED' if args.shallow_qc else pass_nodup,
             'pass_cis_ge_1kb_fraction': pass_cis1,
-            'dovetail_deep_qc_pass': qc_pass,
+            'dovetail_deep_qc_pass': 'NOT_EVALUATED' if args.shallow_qc else qc_pass,
+            'qc_mode': 'shallow_qc' if args.shallow_qc else 'full',
+            'shallow_screening_status': shallow_screen if args.shallow_qc else 'NOT_APPLICABLE',
         })
 
     df = pd.DataFrame(rows)
@@ -103,7 +108,7 @@ def main():
     with open(args.out_status, 'w') as out:
         for _, r in df.iterrows():
             out.write(
-                f"{r['sample']}\t{'PASS' if r['dovetail_deep_qc_pass'] else 'FAIL'}"
+                f"{r['sample']}\t{r['shallow_screening_status'] if args.shallow_qc else ('PASS' if r['dovetail_deep_qc_pass'] else 'FAIL')}"
                 f"\tNoDup={int(r['no_dup_read_pairs'])}"
                 f"\tCis>=1kb={r['cis_ge_1kb_pct_nodup']:.1f}%\n"
             )
@@ -134,8 +139,9 @@ def main():
 
     nodup_m = df['no_dup_read_pairs'] / 1e6
     axes[2].bar(x, nodup_m)
-    axes[2].axhline(args.min_nodup / 1e6, linestyle='--', linewidth=1)
-    axes[2].set_title('Deep-sequencing yield')
+    if not args.shallow_qc:
+        axes[2].axhline(args.min_nodup / 1e6, linestyle='--', linewidth=1)
+    axes[2].set_title('Observed shallow yield' if args.shallow_qc else 'Deep-sequencing yield')
     axes[2].set_ylabel('No-dup read pairs (millions)')
 
     for ax in axes:
@@ -144,7 +150,7 @@ def main():
         ax.spines[['top', 'right']].set_visible(False)
     axes[0].legend(fontsize=8)
     axes[1].legend(fontsize=8)
-    fig.suptitle('Micro-C - QC summary')
+    fig.suptitle('Micro-C - shallow pilot QC (depth criterion not evaluated)' if args.shallow_qc else 'Micro-C - QC summary')
     fig.tight_layout()
     fig.savefig(args.out_pdf)
     plt.close(fig)

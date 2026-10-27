@@ -119,6 +119,7 @@ if config.get("analysis", {}).get("require_differential", False) and not DIFFERE
 
 CHROMSIZES = f"{RESULTS}/reference/chrom.sizes"
 MAIN_VIEW = f"{RESULTS}/reference/main_chromosomes.view.tsv"
+SCALING_VIEW = f"{RESULTS}/reference/main_chromosomes.pairtools.view.tsv"
 AUTOSOMES_VIEW = f"{RESULTS}/reference/autosomes.view.tsv"
 
 PAIR = f"{RESULTS}/pairs/{{sample}}/{{sample}}.nodups.pairs.gz"
@@ -297,10 +298,29 @@ rule process_pairs:
         """
 
 
+# Pairtools 1.1.3 reads the --view TSV as a table with named columns,
+# whereas cooltools consumes the headerless BED4 view. Keep both formats
+# separate so the main view and its downstream files are never rewritten.
+rule prepare_pairtools_scaling_view:
+    input:
+        MAIN_VIEW
+    output:
+        SCALING_VIEW
+    conda:
+        PROCESSING_ENV
+    shell:
+        r"""
+        set -euo pipefail
+        python {SCRIPTS}/prepare_pairtools_scaling_view.py \
+          --input {input} \
+          --output {output}
+        """
+
+
 rule pairtools_scaling:
     input:
         pairs=PAIR,
-        view=MAIN_VIEW
+        view=SCALING_VIEW
     output:
         SCALING
     threads:
@@ -310,6 +330,7 @@ rule pairtools_scaling:
     shell:
         r"""
         set -euo pipefail
+        export PYTHONNOUSERSITE=1
         mkdir -p "$(dirname {output})"
         pairtools scaling \
           --view {input.view} \

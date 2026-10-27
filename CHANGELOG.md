@@ -25,3 +25,9 @@
 **Methods change:** new configs with `contacts.edgeR_min_total_count: 15` will actually use 15, whereas the historical R script used 20 unconditionally. The MIAT config from the audit omits this key; the new Snakefile retains the historical fallback of 20. Any scientific re-analysis after changing this parameter requires a new run and documented comparison.
 
 **No data processed, deleted or published by this RC2 package.** Real Snakemake/Conda/R validation is outstanding.
+
+### RC2 scaling-view hotfix (27 October 2026)
+- Repair `pairtools scaling` with a separate headered `chrom/start/end/name` view.
+  The original headerless BED4 view remains unchanged for cooltools and other consumers.
+- Add strict validation, atomic generation, and three regression checks.
+- Run pairtools in the Snakemake conda environment without user-site Python packages.

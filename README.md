@@ -1,173 +1,119 @@
 # SnakeMicroC
 
-Reusable Snakemake workflow for **Micro-C processing, quality control and downstream 3D genome analysis**.
+An experimental, versioned **Micro-C analysis workflow** based on Snakemake. It processes paired-end FASTQ data into deduplicated pairs, multiresolution contact matrices, QC, structural tracks, and (when supported by the design) differential contacts and chromatin loops. It generates a navigable HTML report, TSV summary/index and Methods text from a single run target.
 
-SnakeMicroC processes paired-end Micro-C sequencing data from FASTQ files through contact-pair generation, matrix construction, quality control and comparative structural analyses.
+> **Status: consolidation release candidate (RC2), 26 October 2026.** Python-level tests pass. A real Snakemake dry-run, Conda environment resolution, and complete MIAT end-to-end validation on the cluster are still required before release or publication. The repository snapshot used for this RC came from the read-only server audit; it has **not** been installed on the laboratory server or published to GitHub.
 
-## Workflow
+## Quick start
 
-```mermaid
-flowchart TD
-    A[Paired-end FASTQ] --> B[BWA-MEM mapping]
-    B --> C[pairtools parse / sort / dedup]
-    C --> D[No-duplicate pairs]
+Create a dedicated project workspace. The repository contains source code only; keep FASTQ, BAM, pairs, coolers and results outside the Git repository.
 
-    D --> E[QC + library complexity]
-    D --> F[cool / mcool matrices]
+```bash
+mkdir -p /path/to/experiment
+cp /path/to/SnakeMicroC/config/config.template.yaml /path/to/experiment/config.yaml
+# Edit all reference, sample and scratch paths in config.yaml
 
-    F --> G[HiCRep reproducibility]
-    F --> H[A/B compartments]
-    F --> I[Insulation and boundaries]
-    F --> J[50 kb contact quantification]
-    J --> K[Differential contacts]
+/path/to/SnakeMicroC/bin/microc validate \
+  --config /path/to/experiment/config.yaml --check-paths
 
-    D --> L[10 kb sample matrices]
-    L --> M[Condition-blind pooled map]
-    M --> N[Pooled loop calling]
-    N --> O[Per-sample loop quantification]
-    O --> P[Differential loop testing]
+/path/to/SnakeMicroC/bin/microc run \
+  --config /path/to/experiment/config.yaml \
+  --workdir /path/to/experiment \
+  --cores 24 --dry-run
 
-    E --> Q[Provenance]
-    G --> Q
-    H --> Q
-    I --> Q
-    K --> Q
-    P --> Q
+/path/to/SnakeMicroC/bin/microc run \
+  --config /path/to/experiment/config.yaml \
+  --workdir /path/to/experiment \
+  --cores 24 --conda-prefix /path/to/snakemake-conda-cache
 ```
 
-## Main analyses
+The `microc` command requires a separate Snakemake executable already on `PATH`. It does **not** install Snakemake or run in the background. On the laboratory system with an older Snakemake command use `--snakemake /absolute/path/to/snakemake` if necessary. The wrapper defaults to Snakemake 7-style `--use-conda --conda-frontend conda`, as used in the MIAT runs; use `--conda-frontend none` on newer versions that do not accept the frontend flag (actual compatibility requires testing).
 
-- BWA-MEM mapping of paired-end FASTQ files
-- pairtools parsing, sorting and duplicate removal
-- mapping and contact-pair quality control
-- library-complexity assessment
-- cool and mcool contact-matrix generation
-- HiCRep sample reproducibility
-- A/B compartment analysis
-- insulation and boundary analysis
-- genome-wide differential contact testing
-- condition-blind pooled loop calling
-- per-sample loop quantification
-- differential loop testing with edgeR
-- automatic software and parameter provenance
-
-## Repository structure
-
-```text
-SnakeMicroC/
-├── Snakefile
-├── config/
-│   └── config.template.yaml
-├── env/
-│   ├── processing.yaml
-│   ├── downstream.yaml
-│   └── r.yaml
-├── scripts/
-│   ├── build_contact50_counts.py
-│   ├── build_loop_counts.py
-│   ├── compare_structural_tracks.py
-│   ├── differential_contacts50_edgeR.R
-│   ├── differential_loops_edgeR.R
-│   ├── library_complexity.py
-│   ├── plot_contact_maps_multisample.py
-│   ├── plot_sample_correlation.py
-│   ├── plot_scaling.py
-│   ├── prepare_reference.py
-│   ├── run_hicrep.py
-│   ├── summarize_qc.py
-│   ├── write_env_versions.py
-│   ├── write_provenance.py
-│   └── write_r_versions.R
-└── README.md
-```
-
-## Conda environments
-
-| Environment | Purpose |
+| Command | Purpose |
 | --- | --- |
-| `env/processing.yaml` | BWA, samtools, pairtools and read-pair processing |
-| `env/downstream.yaml` | cooler, cooltools, bioframe, HiCRep and Python analyses |
-| `env/r.yaml` | edgeR and R-based differential analyses |
+| `microc validate` | Validate sample/configuration consistency; use `--check-paths` to verify reference and FASTQs |
+| `microc qc` | Produce/readjust mapping, pairtools, complexity, contact-decay and map QC |
+| `microc run` | Run all applicable processing, QC, structure, statistical tests, provenance and report |
+| `microc report` | Build report and any **missing dependencies** (not a read-only export) |
 
-## Configuration
+For migration of already-produced MIAT results, temporarily use `--rerun-triggers mtime` and (only if FASTQ files have been archived) `--skip-path-checks` to avoid forcing a huge recalculation while comparing the old and new workflow. New experiments default to tracking file modification time, input, code and parameter changes. See [MIAT migration](docs/MIAT_MIGRATION.md) before running on MIAT.
 
-Start a new project by copying the template:
+## Analysis selection and limitations
 
-```bash
-cp /path/to/SnakeMicroC/config/config.template.yaml ./config.yaml
-```
+- At least one sample: processing, QC and per-sample compartment/insulation tracks.
+- At least two samples: HiCRep reproducibility.
+- At least two control **and** two test samples: descriptive clone/group structural comparisons, edgeR 50-kb differential contacts and 10-kb differential loops (or configured resolutions).
+- Other designs: differential results are marked **not run**, not falsely interpreted as absence of an effect. Set `analysis.require_differential: true` to stop when the design is insufficient.
+- Genomic views are currently **human autosomes 1–22 and chrX**. Other organisms require adapting and validating `prepare_reference.py`; do not merely change `reference.assembly`.
+- The QC contact maps/report figure names are fixed to the 1-Mb QC resolution. Keep `qc.qc_map_resolution: 1000000` in this RC.
+- A/B E1 and insulation group-direction tables are **descriptive**, not statistical tests. A differential contact is not automatically a focal loop or evidence of enhancer–promoter causality.
+- MIAT KO D4/A5 are distinct clones with one observation each; statistical significance depends on modeling assumptions and should not be described as validation across independent biological replicates.
 
-The configuration file defines the reference genome, FASTQ paths, sample names, experimental conditions, processing parameters, QC thresholds and downstream analysis settings.
+## Pipeline stages
 
-Sample identities and conditions are not hard-coded in the workflow.
-
-## Running the workflow
-
-Run SnakeMicroC from the project workspace:
-
-```bash
-
-snakemake \
-  -s /path/to/SnakeMicroC/Snakefile \
-  --configfile ./config.yaml \
-  --use-conda \
-  --conda-frontend conda \
-  --cores 30 \
-  --rerun-triggers mtime \
-  -- \
-  all
-```
-
-If mamba causes environment-creation issues on your system, use `--conda-frontend conda`.
+1. **Processing:** BWA-MEM, pairtools parse/sort/dedup, pairs stats.
+2. **QC:** mapped reads, duplicates, cis/trans, library complexity, P(s), 1-Mb maps, correlation.
+3. **Matrices and structural analysis:** cool/mcool, HiCRep, phased A/B compartment E1, cooltools insulation and boundary scores.
+4. **Differential contacts:** autosomal cis contact candidates filtered by genomic distance **before** edgeR; parameterized count thresholds and FDR.
+5. **Differential loops:** condition-blind pooled Mustache candidates, raw per-sample contact windows, edgeR quasi-likelihood, descriptive concordance.
+6. **Report and provenance:** paper Methods, technical Methods, metric summaries, output index, version tables and resolved YAML.
 
 ## Main outputs
 
 ```text
-results/
-├── pairs/
-├── qc/
-├── mcool/
-├── reproducibility/
-├── structural/
-├── contacts/
-├── loops/
-└── provenance/
+experiment/results/
+  pairs/                # per-sample deduplicated pairs/stats
+  qc/                   # QC, complexity, scaling, map figures
+  mcool/                # full-depth multiresolution maps
+  reproducibility/      # HiCRep SCC
+  structural/           # E1 and insulation tracks + group comparisons
+  contacts/             # differential contacts (if eligible)
+  loops_mustache/       # loop calls and differential results (if eligible)
+  provenance/           # resolved config and software versions
+  report/
+    MicroC_report.html
+    MicroC_summary.tsv
+    MicroC_output_index.tsv
+    MicroC_methods_paper.txt
+    MicroC_methods_provenance.md
 ```
 
-## Default downstream analysis strategy
+**Do not delete intermediates on the strength of a successful report alone.** A successful report establishes only that its expected input files exist and that corresponding Snakemake rules completed; it is not an independent assessment of scientific correctness, library quality or file integrity.
 
-- Primary A/B compartment resolution: **100 kb**
-- Insulation and boundaries: **10 kb bins**
-- Insulation windows: **200 kb and 500 kb**
-- Primary boundary window: **500 kb**
-- Differential contacts: **50 kb**
-- Primary loop resolution: **10 kb**
+## Developer checks
 
-Loop candidates are called on a **condition-blind pooled map** and are subsequently quantified in each individual sample before differential testing.
-
-## Provenance
-
-Every complete run records:
-
-```text
-results/provenance/
-├── resolved_config.yaml
-├── software_versions.tsv
-└── run_summary.tsv
+```bash
+python -m unittest discover -s tests -p 'test*.py' -v
+python -m compileall -q scripts bin
 ```
 
-Software versions are collected independently from the processing, downstream and R environments.
+The test suite uses fake Snakemake and synthetic TSVs; it does **not** test mapping, peak calling, R/edgeR execution, Conda solving or real Snakemake DAG compilation. See [release gates](docs/RELEASE_GATES.md).
 
-## Validation
+## Reproducibility
 
-SnakeMicroC was validated in September 2026 using real Micro-C sequencing data.
+- The Snakefile at repository root is a symlink to `rules/Snakefile`, not a duplicate entrypoint.
+- `env/` contains reproducibility *specifications*, not lockfiles. Several dependencies remain range/unpinned; record exact versions for each run and lock tested environments before a final release.
+- Every code change must be reviewed in Git with tests. Avoid project-specific scripts and exploratory outputs inside the generic pipeline.
+- Example human config: `config/config.template.yaml`. Actual MIAT paths/config stay with the experiment, not in a public code repository.
 
-The FASTQ-to-pairs workflow was tested directly on independent subsets of real paired-end FASTQ files and successfully generated deduplicated pair files and pairtools statistics.
+For the scientific and migration caveats see [MIAT migration](docs/MIAT_MIGRATION.md) and [release gates](docs/RELEASE_GATES.md).
 
-The downstream workflow was also checked through Snakemake DAG construction for QC, matrix generation, HiCRep, compartments, insulation and boundaries, differential contacts, pooled loop calling and differential loop testing.
 
-## Notes
+### Audited reuse of legacy multi-resolution matrices
 
-- Run each experiment from a dedicated project workspace.
-- Do not write project-specific results inside the shared SnakeMicroC directory.
-- Keep experiment-specific biological integration outside the generic core workflow.
+New datasets always build their own `.mcool` files. For an older dataset whose
+existing `.mcool` matrices have been independently compared with newly generated
+primary `.cool` matrices, set `contact_maps.reuse_verified_existing_mcools: true`
+and provide `existing_mcool_equivalence_tsv` (absolute path). The entire sample
+set must have `bins_match=YES`, `pixels_match=YES`, `status=PASS`. A report older
+than either matrix is refused. In this mode the workflow intentionally has no
+producer for the adopted `.mcool` files; missing files cause an error.
+
+The adoption evidence currently certifies raw pixels at **50 kb only**, not all
+matrix resolutions or balance weights. Inspect those separately during release
+validation. For MIAT-specific instructions see `docs/MIAT_MIGRATION.md`.
+
+`microc ... --rerun-triggers full` (the default) checks timestamps plus input,
+code, parameters and Conda environment provenance. For a carefully audited
+legacy migration only, `code-and-params` deliberately excludes timestamps.
+This option must never be used to ignore unverified changed source data.

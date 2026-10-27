@@ -14,6 +14,15 @@ def parse_csv(x):
     return [v for v in x.split(",") if v]
 
 
+def ordered_candidate_keys(sample_dicts):
+    """Return genomic pixel coordinates in a stable, reproducible order.
+
+    Iterating over a set would assign different contact IDs across runs,
+    even when the underlying contact matrix and counts were identical.
+    """
+    return sorted(set().union(*(d.keys() for d in sample_dicts.values())))
+
+
 def chromosome_names(view_path):
     x = pd.read_csv(view_path, sep="\t", header=None)
     return x.iloc[:, 0].astype(str).tolist()
@@ -112,9 +121,7 @@ def main():
             for s in samples
         }
 
-        keys = set().union(
-            *(d.keys() for d in sample_dicts.values())
-        )
+        keys = ordered_candidate_keys(sample_dicts)
 
         n_union = len(keys)
         rows = []

@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""One-entry-point command-line interface for SnakeMicroC.
+
+This script never installs software or deletes intermediate files. `run`, `qc`
+and `report` invoke the existing Snakemake workflow. `validate` is read-only.
+"""
+from __future__ import annotations
+
+import argparse
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from validate_config import ConfigurationError, load_and_validate  # noqa: E402
+from verified_mcool import AdoptionError, verify_existing_mcools  # noqa: E402
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__)
+    sub = p.add_subparsers(dest="command", required=True)
+    for name in ("validate", "qc", "run", "report"):
+        x = sub.add_parser(name)
+        x.add_argument("--config", required=True, help="Experiment YAML")
+        x.add_argument("--check-paths", action="store_true", help="Check reference and FASTQ existence")
+        if name != "validate":
+            x.add_argument("--skip-path-checks", action="store_true",
+                           help="Permit reuse of completed project outputs after FASTQ archival; use only for audited migrations")
+            x.add_argument("--cores", type=int, default=8)
+            x.add_argument("--workdir", help="Experiment workspace (defaults to config parent)")
+            x.add_argument("--conda-prefix", help="Shared Snakemake Conda environments location")
+            x.add_argument("--conda-frontend", choices=("conda", "mamba", "none"), default="conda",
+                           help="Use conda or mamba for Snakemake 7; select none for installations without this flag")
+            x.add_argument("--snakemake", default="snakemake", help="Snakemake executable path")
+            x.add_argument("--dry-run", action="store_true")
+            x.add_argument("--rerun-triggers", choices=("full", "mtime", "code-and-params"), default="full",
+                           help="full (default): all provenance triggers; mtime: timestamps only; code-and-params: skip timestamps (audited migrations only)")
+    args = p.parse_args(argv)
+    try:
+        check_paths = args.check_paths or (
+            args.command in ("qc", "run") and not getattr(args, "skip_path_checks", False)
+        )
+        status = load_and_validate(args.config, check_paths=check_paths)
+    except ConfigurationError as exc:
+        p.error(str(exc))
+    print(f"[SnakeMicroC] {status['samples']} samples; {status['message']}", flush=True)
+    if args.command == "validate":
+        try:
+            adopted = verify_existing_mcools(status["config"], Path(args.config).resolve().parent)
+        except AdoptionError as exc:
+            p.error(str(exc))
+        if adopted is not None:
+            print(f"[SnakeMicroC] Audited legacy matrix adoption: {adopted}", flush=True)
+        return 0
+    if args.cores < 1:
+        p.error("--cores must be at least 1")
+    snake = shutil.which(args.snakemake)
+    if not snake:
+        p.error(f"Snakemake executable not found: {args.snakemake}. Activate your Snakemake environment first.")
+    configfile = Path(args.config).resolve()
+    workdir = Path(args.workdir).resolve() if args.workdir else configfile.parent
+    if not workdir.is_dir():
+        p.error(f"Workspace does not exist: {workdir}")
+    try:
+        adopted = verify_existing_mcools(status["config"], workdir)
+    except AdoptionError as exc:
+        p.error(str(exc))
+    if adopted is not None:
+        print(f"[SnakeMicroC] Audited legacy matrix adoption: {adopted}", flush=True)
+    target = {"qc": "qc", "run": "all", "report": "report"}[args.command]
+    cmd = [snake, "--snakefile", str(ROOT / "Snakefile"), "--configfile", str(configfile), "--directory", str(workdir), "--cores", str(args.cores), "--use-conda", "--rerun-triggers"]
+    triggers = {
+        "mtime": ["mtime"],
+        "code-and-params": ["input", "params", "code", "software-env"],
+        "full": ["mtime", "input", "params", "code", "software-env"],
+    }
+    cmd.extend(triggers[args.rerun_triggers])
+    if args.conda_frontend != "none":
+        cmd.extend(["--conda-frontend", args.conda_frontend])
+    if args.conda_prefix:
+        cmd.extend(["--conda-prefix", str(Path(args.conda_prefix).resolve())])
+    if args.dry_run:
+        cmd.extend(["--dry-run", "--printshellcmds"])
+    cmd.append(target)
+    print("[SnakeMicroC] " + " ".join(cmd), flush=True)
+    return subprocess.call(cmd)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

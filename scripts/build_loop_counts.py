@@ -11,121 +11,201 @@ import pandas as pd
 
 
 def parse_csv(x):
-    return [v for v in x.split(",") if v]
+    return [
+        v for v in x.split(",")
+        if v
+    ]
 
 
 def window_sum(mat, i, j, r):
-    i0 = max(0, i-r)
-    i1 = min(mat.shape[0], i+r+1)
+    i0 = max(0, i - r)
+    i1 = min(mat.shape[0], i + r + 1)
 
-    j0 = max(0, j-r)
-    j1 = min(mat.shape[1], j+r+1)
+    j0 = max(0, j - r)
+    j1 = min(mat.shape[1], j + r + 1)
 
     return float(
-        mat[i0:i1, j0:j1].sum()
+        mat[
+            i0:i1,
+            j0:j1
+        ].sum()
     )
+
+
+def finite_or_nan(x):
+    x = float(x)
+
+    if np.isfinite(x):
+        return x
+
+    return np.nan
 
 
 def main():
     ap = argparse.ArgumentParser()
 
-    ap.add_argument("--samples", required=True)
-    ap.add_argument("--resolution", type=int, required=True)
-    ap.add_argument("--min-distance-bp", type=int, required=True)
-    ap.add_argument("--max-distance-bp", type=int, required=True)
-    ap.add_argument("--quant-radius-bins", type=int, required=True)
+    ap.add_argument(
+        "--samples",
+        required=True
+    )
 
-    ap.add_argument("--dots", required=True)
-    ap.add_argument("--cool-pattern", required=True)
-    ap.add_argument("--outdir", required=True)
+    ap.add_argument(
+        "--resolution",
+        type=int,
+        required=True
+    )
+
+    ap.add_argument(
+        "--quant-radius-bins",
+        type=int,
+        required=True
+    )
+
+    ap.add_argument(
+        "--loops",
+        required=True
+    )
+
+    ap.add_argument(
+        "--cool-pattern",
+        required=True
+    )
+
+    ap.add_argument(
+        "--outdir",
+        required=True
+    )
 
     args = ap.parse_args()
 
-    samples = parse_csv(args.samples)
+    samples = parse_csv(
+        args.samples
+    )
 
     if len(samples) < 2:
         raise ValueError(
             "At least two samples are required"
         )
 
-    outdir = Path(args.outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
+    outdir = Path(
+        args.outdir
+    )
 
-    dots = pd.read_csv(
-        args.dots,
+    outdir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    loops = pd.read_csv(
+        args.loops,
         sep="\t"
     )
 
-    req = [
+    required = [
+        "loop_id",
         "chrom1",
         "start1",
         "end1",
         "chrom2",
         "start2",
         "end2",
+        "distance_bp",
     ]
 
     missing = [
-        x for x in req
-        if x not in dots.columns
+        x for x in required
+        if x not in loops.columns
     ]
 
     if missing:
         raise ValueError(
-            f"Dot table missing {missing}; "
-            f"columns={list(dots.columns)}"
+            f"Loop table missing {missing}; "
+            f"columns={list(loops.columns)}"
         )
 
-    dots = dots[
-        dots.chrom1.eq(dots.chrom2)
-    ].copy()
-
-    dots["distance_bp"] = (
-        dots.start2 - dots.start1
-    ).abs()
-
-    dots = dots[
-        dots.distance_bp.between(
-            args.min_distance_bp,
-            args.max_distance_bp
+    if loops["loop_id"].duplicated().any():
+        raise ValueError(
+            "loop_id values are not unique"
         )
-    ].copy()
 
-    dots = (
-        dots
-        .sort_values(
-            ["chrom1", "start1", "start2"]
+    # --------------------------------------------------------
+    # Open sample coolers and record total contact depth.
+    # These totals are used as edgeR exposure/library sizes.
+    # --------------------------------------------------------
+
+    cools = {}
+
+    library_rows = []
+
+    for sample in samples:
+        path = args.cool_pattern.format(
+            sample=sample,
+            resolution=args.resolution
         )
-        .reset_index(drop=True)
+
+        clr = cooler.Cooler(
+            path
+        )
+
+        if clr.binsize != args.resolution:
+            raise ValueError(
+                f"{sample}: cooler binsize "
+                f"{clr.binsize} != expected "
+                f"{args.resolution}"
+            )
+
+        total = clr.info.get(
+            "sum",
+            None
+        )
+
+        if total is None:
+            raise ValueError(
+                f"{sample}: cooler info does not "
+                "contain total contact sum"
+            )
+
+        total = int(total)
+
+        if total <= 0:
+            raise ValueError(
+                f"{sample}: invalid cooler sum {total}"
+            )
+
+        cools[sample] = clr
+
+        library_rows.append({
+            "sample": sample,
+            "total_contacts": total,
+            "resolution": args.resolution,
+            "cooler": path,
+        })
+
+    library_sizes = pd.DataFrame(
+        library_rows
     )
 
-    dots["loop_id"] = [
-        f"LOOP_{i:06d}"
-        for i in range(
-            1,
-            len(dots) + 1
-        )
-    ]
+    library_sizes.to_csv(
+        outdir /
+        "loop_library_sizes.tsv",
+        sep="\t",
+        index=False
+    )
 
-    cools = {
-        s: cooler.Cooler(
-            args.cool_pattern.format(
-                sample=s,
-                resolution=args.resolution
-            )
-        )
-        for s in samples
-    }
+    # --------------------------------------------------------
+    # Quantify every condition-blind candidate in every sample
+    # --------------------------------------------------------
 
     outrows = []
 
-    for chrom, d in dots.groupby(
+    for chrom, d in loops.groupby(
         "chrom1",
         sort=False
     ):
         cache = {}
 
-        for s, clr in cools.items():
+        for sample, clr in cools.items():
+
             bins = (
                 clr.bins()
                 .fetch(chrom)
@@ -157,7 +237,7 @@ def main():
                 .tocsr()
             )
 
-            cache[s] = (
+            cache[sample] = (
                 start_to_idx,
                 raw,
                 bal
@@ -166,80 +246,87 @@ def main():
         for rr in d.itertuples(
             index=False
         ):
-            rec = {
-                k: getattr(rr, k)
-                for k in req
-            }
+            rec = rr._asdict()
 
-            rec["loop_id"] = rr.loop_id
-            rec["distance_bp"] = int(
-                rr.distance_bp
-            )
+            for sample in samples:
+                idx, raw, bal = cache[
+                    sample
+                ]
 
-            for s in samples:
-                idx, raw, bal = cache[s]
+                start1 = int(
+                    rr.start1
+                )
+
+                start2 = int(
+                    rr.start2
+                )
 
                 if (
-                    int(rr.start1) not in idx
+                    start1 not in idx
                     or
-                    int(rr.start2) not in idx
+                    start2 not in idx
                 ):
-                    rec[
-                        f"{s}_raw_center"
-                    ] = np.nan
+                    raise ValueError(
+                        f"{rr.loop_id}: anchor missing "
+                        f"from {sample} cooler: "
+                        f"{chrom}:{start1}, "
+                        f"{chrom}:{start2}"
+                    )
 
-                    rec[
-                        f"{s}_raw_3x3"
-                    ] = np.nan
+                i = idx[start1]
+                j = idx[start2]
 
-                    rec[
-                        f"{s}_balanced_center"
-                    ] = np.nan
+                raw_center = float(
+                    raw[i, j]
+                )
 
-                    rec[
-                        f"{s}_balanced_3x3"
-                    ] = np.nan
-
-                    continue
-
-                i = idx[int(rr.start1)]
-                j = idx[int(rr.start2)]
-
-                rec[
-                    f"{s}_raw_center"
-                ] = float(raw[i, j])
-
-                rec[
-                    f"{s}_raw_3x3"
-                ] = window_sum(
+                raw_count = window_sum(
                     raw,
                     i,
                     j,
                     args.quant_radius_bins
                 )
 
-                x = bal[i, j]
+                bal_center = finite_or_nan(
+                    bal[i, j]
+                )
 
+                bal_count = finite_or_nan(
+                    window_sum(
+                        bal,
+                        i,
+                        j,
+                        args.quant_radius_bins
+                    )
+                )
+
+                # Raw contact counts must remain integer.
                 rec[
-                    f"{s}_balanced_center"
-                ] = (
-                    float(x)
-                    if np.isfinite(x)
-                    else np.nan
+                    f"{sample}_raw_center"
+                ] = int(
+                    round(raw_center)
                 )
 
                 rec[
-                    f"{s}_balanced_3x3"
-                ] = window_sum(
-                    bal,
-                    i,
-                    j,
-                    args.quant_radius_bins
+                    f"{sample}_raw_count"
+                ] = int(
+                    round(raw_count)
                 )
+
+                # Balanced values are QC/visualization only.
+                rec[
+                    f"{sample}_balanced_center"
+                ] = bal_center
+
+                rec[
+                    f"{sample}_balanced_count"
+                ] = bal_count
 
             outrows.append(rec)
 
-    out = pd.DataFrame(outrows)
+    out = pd.DataFrame(
+        outrows
+    )
 
     out.to_csv(
         outdir /
@@ -249,11 +336,8 @@ def main():
         compression="gzip"
     )
 
-    dots.to_csv(
-        outdir /
-        "pooled_loop_candidates.bedpe.tsv",
-        sep="\t",
-        index=False
+    n = (
+        2 * args.quant_radius_bins + 1
     )
 
     print(
@@ -261,15 +345,16 @@ def main():
         f"{len(out):,}"
     )
 
-    n = (
-        2 * args.quant_radius_bins + 1
+    print(
+        "Differential quantification uses raw "
+        f"{n}x{n} contact windows around each "
+        f"{args.resolution // 1000}-kb loop pixel."
     )
 
     print(
-        f"Differential quantification uses "
-        f"a {n}x{n} window around each "
-        f"{args.resolution // 1000}-kb "
-        f"loop pixel."
+        "Library sizes for edgeR are total "
+        "contacts stored in the corresponding "
+        "full-depth sample coolers."
     )
 
 

@@ -2,6 +2,9 @@
 # Reproducible Micro-C processing, QC and downstream structural analysis.
 
 import os
+import sys
+import json
+import hashlib
 WORKFLOW_BASEDIR = os.path.abspath(workflow.basedir)
 
 # Support both:
@@ -24,12 +27,28 @@ if not os.path.exists(
         f"workflow.basedir={workflow.basedir}"
     )
 
+# A parameter fingerprint makes changes in the experiment config visible to
+# Snakemake's provenance triggers, including for run-block-generated outputs.
+CONFIG_FINGERPRINT = hashlib.sha256(
+    json.dumps(dict(config), sort_keys=True, default=str).encode("utf-8")
+).hexdigest()
+
 RESULTS = config.get("results_dir", "results")
 TMPDIR = config["tmpdir"]
 
 PROCESSING_ENV = os.path.join(PIPELINE_DIR, "env", "processing.yaml")
 DOWNSTREAM_ENV = os.path.join(PIPELINE_DIR, "env", "downstream.yaml")
+MUSTACHE_ENV = os.path.join(PIPELINE_DIR, "env", "mustache.yaml")
+METHODS_ENV = os.path.join(PIPELINE_DIR, "env", "methods.yaml")
 SCRIPTS = os.path.join(PIPELINE_DIR, "scripts")
+sys.path.insert(0, SCRIPTS)
+from verified_mcool import verify_existing_mcools
+
+# Opt-in adoption is restricted to legacy experiments with verified 50-kb
+# pixel-equivalence evidence. The default for new datasets is full processing.
+REUSE_VERIFIED_MCOOLS = bool(config.get("contact_maps", {}).get("reuse_verified_existing_mcools", False))
+if REUSE_VERIFIED_MCOOLS:
+    verify_existing_mcools(config, os.getcwd())
 
 
 R_ENV = os.path.join(PIPELINE_DIR, "env", "r.yaml")
@@ -40,6 +59,11 @@ CONTACT_RES = int(
 
 LOOP_RES = int(
     config["loops"]["primary_resolution"]
+)
+
+LOOPS_DIR = (
+    f"{RESULTS}/loops_mustache/"
+    f"{LOOP_RES}"
 )
 
 THREADS = int(
@@ -63,13 +87,14 @@ IGNORE_DIAGS = int(
 
 SAMPLES = list(config["samples"].keys())
 
-if len(SAMPLES) < 2:
-    raise ValueError("At least two samples are required.")
+if not SAMPLES:
+    raise ValueError("At least one sample is required.")
 
 CONDITIONS = [config["samples"][s]["condition"] for s in SAMPLES]
 
-CONTROL_CONDITION = config["comparison"]["control_condition"]
-TEST_CONDITION = config["comparison"]["test_condition"]
+COMPARISON = config.get("comparison") or {}
+CONTROL_CONDITION = COMPARISON.get("control_condition")
+TEST_CONDITION = COMPARISON.get("test_condition")
 
 CONTROL_SAMPLES = [
     s for s in SAMPLES
@@ -81,11 +106,16 @@ TEST_SAMPLES = [
     if config["samples"][s]["condition"] == TEST_CONDITION
 ]
 
-if len(CONTROL_SAMPLES) < 2 or len(TEST_SAMPLES) < 2:
-    raise ValueError(
-        "SnakeMicroC currently requires at least two biological samples "
-        "per condition for differential analyses."
-    )
+# QC, matrices and descriptive structural tracks are possible for a single
+# library. A comparison requires >=2 samples in each group. This guard is
+# used for DAG selection, not to assert statistical independence of clones.
+DIFFERENTIAL_ENABLED = (
+    bool(config.get("analysis", {}).get("differential", True))
+    and len(CONTROL_SAMPLES) >= 2
+    and len(TEST_SAMPLES) >= 2
+)
+if config.get("analysis", {}).get("require_differential", False) and not DIFFERENTIAL_ENABLED:
+    raise ValueError("Differential analysis requested but fewer than two samples per group were provided")
 
 CHROMSIZES = f"{RESULTS}/reference/chrom.sizes"
 MAIN_VIEW = f"{RESULTS}/reference/main_chromosomes.view.tsv"
@@ -94,15 +124,25 @@ AUTOSOMES_VIEW = f"{RESULTS}/reference/autosomes.view.tsv"
 PAIR = f"{RESULTS}/pairs/{{sample}}/{{sample}}.nodups.pairs.gz"
 STATS = f"{RESULTS}/pairs/{{sample}}/{{sample}}.stats.txt"
 SCALING = f"{RESULTS}/qc/scaling/{{sample}}.scaling.tsv"
-QC_COOL = f"{RESULTS}/qc/maps/{{sample}}.1Mb.cool"
 MCOOL = f"{RESULTS}/mcool/{{sample}}.mcool"
 
 BASE_RES = int(config["contact_maps"]["base_resolution"])
 ZOOM_RES = [int(x) for x in config["contact_maps"]["resolutions"]]
 ZOOM_RES_CSV = ",".join(str(x) for x in ZOOM_RES)
 QC_RES = int(config["qc"]["qc_map_resolution"])
+QC_MCOOL_URIS = " ".join(
+    f"{RESULTS}/mcool/{sample}.mcool::/resolutions/{QC_RES}"
+    for sample in SAMPLES
+)
 COMP_RES = int(config["compartments"]["primary_resolution"])
 INS_RES = int(config["boundaries"]["resolution"])
+# For equal resolutions, insulation and loop calling share the same
+# full-depth balanced cooler; no second cload+balance operation.
+INS_COOL = (
+    f"{LOOPS_DIR}/cool/{{sample}}.cool"
+    if INS_RES == LOOP_RES else
+    f"{RESULTS}/structural/insulation/cool/{{sample}}.{INS_RES}.cool"
+)
 INS_WIN = int(config["boundaries"]["primary_window"])
 
 INS_WINDOWS = [
@@ -120,6 +160,45 @@ BOUNDARY_THRESHOLD = str(
 )
 HICREP_RES = int(config["reproducibility"]["resolution"])
 
+# Canonical output lists are shared by the downstream, Methods and report
+# targets. The set of required products depends on the sample design.
+QC_TARGETS = [
+    f"{RESULTS}/qc/qc_summary.tsv",
+    f"{RESULTS}/qc/qc_status.txt",
+    f"{RESULTS}/qc/qc_summary.pdf",
+    f"{RESULTS}/qc/scaling_curves.pdf",
+    f"{RESULTS}/qc/scaling_curves.tsv",
+    f"{RESULTS}/qc/contact_maps_1Mb.pdf",
+    f"{RESULTS}/qc/contact_map_correlation_1Mb.tsv",
+    f"{RESULTS}/qc/contact_map_correlation_1Mb.pdf",
+    f"{RESULTS}/qc/library_complexity.tsv",
+    f"{RESULTS}/qc/library_complexity.pdf",
+    f"{RESULTS}/qc/library_complexity_status.txt",
+]
+ANALYSIS_TARGETS = (
+    expand(MCOOL, sample=SAMPLES)
+    + expand(f"{RESULTS}/structural/compartments/{{sample}}.{COMP_RES}.cis.vecs.tsv", sample=SAMPLES)
+    + expand(f"{RESULTS}/structural/insulation/{{sample}}.{INS_RES}.{INS_WIN}.tsv", sample=SAMPLES)
+)
+if len(SAMPLES) >= 2:
+    ANALYSIS_TARGETS += [
+        f"{RESULTS}/reproducibility/hicrep_SCC_long.tsv",
+        f"{RESULTS}/reproducibility/hicrep_SCC_matrix.tsv",
+    ]
+if DIFFERENTIAL_ENABLED:
+    ANALYSIS_TARGETS += [
+        f"{RESULTS}/structural/compartments_clone_effects.tsv.gz",
+        f"{RESULTS}/structural/insulation_clone_effects.tsv.gz",
+        f"{RESULTS}/contacts/differential_contacts50_all.tsv.gz",
+        f"{RESULTS}/contacts/differential_contacts50_core.tsv",
+        f"{RESULTS}/contacts/differential_contacts50_summary.tsv",
+        f"{LOOPS_DIR}/differential_loops_all.tsv.gz",
+        f"{LOOPS_DIR}/differential_loops_core.tsv",
+        f"{LOOPS_DIR}/differential_loop_summary.tsv",
+        f"{LOOPS_DIR}/MicroC_loop_analysis_report.html",
+        f"{LOOPS_DIR}/MicroC_loop_analysis_report.md",
+    ]
+
 
 def sample_r1(wc):
     return config["samples"][wc.sample]["r1"]
@@ -129,37 +208,15 @@ def sample_r2(wc):
     return config["samples"][wc.sample]["r2"]
 
 
-# Deliberately no default all-target. Run `snakemake ... qc` first.
-
+# The CLI passes an explicit target: qc, downstream, report or all.
 rule qc:
     input:
-        summary=f"{RESULTS}/qc/qc_summary.tsv",
-        status=f"{RESULTS}/qc/qc_status.txt",
-        summary_pdf=f"{RESULTS}/qc/qc_summary.pdf",
-        scaling_pdf=f"{RESULTS}/qc/scaling_curves.pdf",
-        scaling_tsv=f"{RESULTS}/qc/scaling_curves.tsv",
-        maps_pdf=f"{RESULTS}/qc/contact_maps_1Mb.pdf",
-        corr_tsv=f"{RESULTS}/qc/contact_map_correlation_1Mb.tsv",
-        corr_pdf=f"{RESULTS}/qc/contact_map_correlation_1Mb.pdf",
-        complexity_tsv=f"{RESULTS}/qc/library_complexity.tsv",
-        complexity_pdf=f"{RESULTS}/qc/library_complexity.pdf",
-        complexity_status=f"{RESULTS}/qc/library_complexity_status.txt"
+        QC_TARGETS
 
 
 rule downstream:
     input:
-        expand(MCOOL, sample=SAMPLES),
-        f"{RESULTS}/reproducibility/hicrep_SCC_long.tsv",
-        f"{RESULTS}/reproducibility/hicrep_SCC_matrix.tsv",
-        f"{RESULTS}/structural/compartments_clone_effects.tsv.gz",
-        f"{RESULTS}/structural/insulation_clone_effects.tsv.gz",
-        f"{RESULTS}/contacts/differential_contacts50_all.tsv.gz",
-        f"{RESULTS}/contacts/differential_contacts50_core.tsv",
-        f"{RESULTS}/contacts/differential_contacts50_summary.tsv",
-        f"{RESULTS}/loops/differential_loops_all.tsv.gz",
-        f"{RESULTS}/loops/differential_loops_core.tsv",
-        f"{RESULTS}/loops/differential_loop_summary.tsv",
-
+        ANALYSIS_TARGETS
 
 
 rule prepare_reference:
@@ -318,48 +375,23 @@ rule plot_scaling:
         """
 
 
-rule make_qc_cool:
-    input:
-        pairs=PAIR,
-        chromsizes=CHROMSIZES
-    output:
-        temp(QC_COOL)
-    threads:
-        int(config["contact_maps"]["balance_threads"])
-    conda:
-        DOWNSTREAM_ENV
-    params:
-        res=QC_RES,
-        assembly=config["reference"]["assembly"],
-        ignore_diags=int(config["contact_maps"]["ignore_diags"])
-    shell:
-        r"""
-        set -euo pipefail
-        mkdir -p "$(dirname {output})"
-        python -m cooler cload pairs \
-          --assembly {params.assembly} \
-          -c1 2 -p1 3 -c2 4 -p2 5 \
-          {input.chromsizes}:{params.res} \
-          {input.pairs} \
-          {output}
-        python -m cooler balance -p {threads} --ignore-diags {params.ignore_diags} {output}
-        """
-
-
+# The .mcool already contains the QC resolution. Consume its URI directly,
+# instead of building and rebalancing a separate per-sample 1-Mb .cool.
 rule plot_qc_contact_maps:
     input:
-        expand(QC_COOL, sample=SAMPLES)
+        expand(MCOOL, sample=SAMPLES)
     output:
         f"{RESULTS}/qc/contact_maps_1Mb.pdf"
     conda:
         DOWNSTREAM_ENV
     params:
-        samples=" ".join(SAMPLES)
+        samples=" ".join(SAMPLES),
+        cool_uris=QC_MCOOL_URIS
     shell:
         r"""
         set -euo pipefail
         python {SCRIPTS}/plot_contact_maps_multisample.py \
-          --cools {input} \
+          --cools {params.cool_uris} \
           --samples {params.samples} \
           --out-pdf {output}
         """
@@ -367,73 +399,68 @@ rule plot_qc_contact_maps:
 
 rule qc_correlation:
     input:
-        expand(QC_COOL, sample=SAMPLES)
+        expand(MCOOL, sample=SAMPLES)
     output:
         tsv=f"{RESULTS}/qc/contact_map_correlation_1Mb.tsv",
         pdf=f"{RESULTS}/qc/contact_map_correlation_1Mb.pdf"
     conda:
         DOWNSTREAM_ENV
     params:
-        samples=" ".join(SAMPLES)
+        samples=" ".join(SAMPLES),
+        cool_uris=QC_MCOOL_URIS
     shell:
         r"""
         set -euo pipefail
         python {SCRIPTS}/plot_sample_correlation.py \
-          --cools {input} \
+          --cools {params.cool_uris} \
           --samples {params.samples} \
           --out-tsv {output.tsv} \
           --out-pdf {output.pdf}
         """
 
 
-rule make_base_cool:
-    input:
-        pairs=PAIR,
-        chromsizes=CHROMSIZES
-    output:
-        temp(f"{RESULTS}/mcool/tmp/{{sample}}.{BASE_RES}.cool")
-    conda:
-        DOWNSTREAM_ENV
-    params:
-        res=BASE_RES,
-        assembly=config["reference"]["assembly"]
-    shell:
-        r"""
-        set -euo pipefail
-        mkdir -p "$(dirname {output})"
-        python -m cooler cload pairs \
-          --assembly {params.assembly} \
-          -c1 2 -p1 3 -c2 4 -p2 5 \
-          {input.chromsizes}:{params.res} \
-          {input.pairs} \
-          {output}
-        """
-
-
-rule make_mcool:
-    input:
-        f"{RESULTS}/mcool/tmp/{{sample}}.{BASE_RES}.cool"
-    output:
-        MCOOL
-    threads:
-        int(config["contact_maps"]["balance_threads"])
-    conda:
-        DOWNSTREAM_ENV
-    params:
-        resolutions=ZOOM_RES_CSV,
-        ignore_diags=int(config["contact_maps"]["ignore_diags"])
-    shell:
-        r"""
-        set -euo pipefail
-        mkdir -p "$(dirname {output})"
-        python -m cooler zoomify \
-          -p {threads} \
-          -r {params.resolutions} \
-          --balance \
-          --balance-args '--nproc {threads} --ignore-diags {params.ignore_diags}' \
-          -o {output} \
-          {input}
-        """
+# A single producer for the .mcool keeps the DAG independent of
+# deleted 25-kb temporary inputs. All temporary files are private to the job.
+# For a verified legacy adoption, the .mcool files are external inputs; no
+# rule is defined that could accidentally overwrite them.
+if not REUSE_VERIFIED_MCOOLS:
+    rule make_mcool:
+        input:
+            pairs=PAIR,
+            chromsizes=CHROMSIZES
+        output:
+            MCOOL
+        threads:
+            int(config["contact_maps"]["balance_threads"])
+        conda:
+            DOWNSTREAM_ENV
+        params:
+            base_res=BASE_RES,
+            assembly=config["reference"]["assembly"],
+            resolutions=ZOOM_RES_CSV,
+            ignore_diags=IGNORE_DIAGS,
+            scratch=TMPDIR
+        shell:
+            r"""
+            set -euo pipefail
+            mkdir -p "{params.scratch}" "$(dirname {output})"
+            scratch=$(mktemp -d "{params.scratch}/microc_mcool_XXXXXX")
+            trap 'rm -f "$scratch/base.cool" "$scratch/output.mcool"; rmdir "$scratch" 2>/dev/null || true' EXIT
+            python -m cooler cload pairs \
+              --assembly {params.assembly} \
+              -c1 2 -p1 3 -c2 4 -p2 5 \
+              {input.chromsizes}:{params.base_res} \
+              {input.pairs} \
+              "$scratch/base.cool"
+            python -m cooler zoomify \
+              -p {threads} \
+              -r {params.resolutions} \
+              --balance \
+              --balance-args '--nproc {threads} --ignore-diags {params.ignore_diags}' \
+              -o "$scratch/output.mcool" \
+              "$scratch/base.cool"
+            mv "$scratch/output.mcool" {output}
+            """
 
 
 rule hicrep_reproducibility:
@@ -524,9 +551,42 @@ rule compartments:
         """
 
 
+# If the required insulation resolution differs from the loop-calling
+# resolution, a dedicated matrix is necessary. Otherwise INS_COOL points
+# directly to the existing 10-kb loop cooler (and no duplicate is created).
+if INS_RES != LOOP_RES:
+    rule insulation_cool:
+        input:
+            pairs=PAIR,
+            chroms=CHROMSIZES
+        output:
+            INS_COOL
+        threads:
+            BALANCE_THREADS
+        conda:
+            DOWNSTREAM_ENV
+        params:
+            res=INS_RES
+        shell:
+            r"""
+            set -euo pipefail
+            mkdir -p "$(dirname {output})"
+            cooler cload pairs \
+              -c1 2 -p1 3 \
+              -c2 4 -p2 5 \
+              {input.chroms}:{params.res} \
+              {input.pairs} \
+              {output}
+            cooler balance \
+              -p {threads} \
+              --ignore-diags {IGNORE_DIAGS} \
+              {output}
+            """
+
+
 rule insulation:
     input:
-        cool=f"{RESULTS}/loops/cool/{{sample}}.{LOOP_RES}.cool",
+        cool=INS_COOL,
         view=MAIN_VIEW
     output:
         f"{RESULTS}/structural/insulation/{{sample}}.{INS_RES}.{INS_WIN}.tsv"
@@ -540,9 +600,7 @@ rule insulation:
     shell:
         r"""
         set -euo pipefail
-
         mkdir -p {RESULTS}/structural/insulation
-
         cooltools insulation \
           --view {input.view} \
           -p {threads} \
@@ -654,7 +712,9 @@ rule differential_contacts50:
         ),
         lfc=float(
             config["contacts"]["differential_min_abs_log2fc"]
-        )
+        ),
+        mincount=int(config["contacts"].get("edgeR_min_count", 5)),
+        mintotal=int(config["contacts"].get("edgeR_min_total_count", 20))
     shell:
         r"""
         set -euo pipefail
@@ -664,13 +724,25 @@ rule differential_contacts50:
           --outdir {RESULTS}/contacts \
           --fdr {params.fdr} \
           --min-abs-log2fc {params.lfc} \
+          --min-count {params.mincount} \
+          --min-total-count {params.mintotal} \
           --control-samples '{params.controls}' \
           --test-samples '{params.tests}'
         """
 
 
 # ============================================================
-# CONDITION-BLIND LOOP CALLING
+# CONDITION-BLIND LOOP CALLING - MUSTACHE
+#
+# Primary analysis:
+#   10 kb
+#
+# High-resolution secondary analysis:
+#   5 kb, run separately by changing primary_resolution.
+#
+# Candidate discovery is condition-blind.
+# Differential quantification uses full-depth per-sample
+# raw contact counts.
 # ============================================================
 
 rule loop_cool:
@@ -678,7 +750,7 @@ rule loop_cool:
         pairs=PAIR,
         chroms=CHROMSIZES
     output:
-        f"{RESULTS}/loops/cool/{{sample}}.{LOOP_RES}.cool"
+        f"{LOOPS_DIR}/cool/{{sample}}.cool"
     threads:
         BALANCE_THREADS
     conda:
@@ -708,11 +780,11 @@ rule loop_cool:
 rule pooled_loop_cool:
     input:
         expand(
-            f"{RESULTS}/loops/cool/{{sample}}.{LOOP_RES}.cool",
+            f"{LOOPS_DIR}/cool/{{sample}}.cool",
             sample=SAMPLES
         )
     output:
-        f"{RESULTS}/loops/pooled_all_samples.{LOOP_RES}.cool"
+        f"{LOOPS_DIR}/pooled_all_samples.cool"
     threads:
         BALANCE_THREADS
     conda:
@@ -721,7 +793,8 @@ rule pooled_loop_cool:
         r"""
         set -euo pipefail
 
-        mkdir -p {RESULTS}/loops
+        mkdir -p {LOOPS_DIR}
+
         rm -f {output}.tmp.cool
 
         cooler merge \
@@ -739,84 +812,120 @@ rule pooled_loop_cool:
         """
 
 
-rule pooled_loop_expected:
+rule pooled_loop_mustache:
     input:
-        cool=rules.pooled_loop_cool.output,
-        view=MAIN_VIEW
+        cool=rules.pooled_loop_cool.output
     output:
-        f"{RESULTS}/loops/pooled_all_samples.expected_cis.{LOOP_RES}.tsv"
+        loops=f"{LOOPS_DIR}/pooled_all_samples.mustache.raw.tsv",
+        parameters=f"{LOOPS_DIR}/mustache_parameters.tsv",
+        versions=f"{LOOPS_DIR}/mustache_environment_versions.txt"
     threads:
-        THREADS
+        int(
+            config.get(
+                "loops",
+                {}
+            ).get(
+                "mustache_threads",
+                12
+            )
+        )
     conda:
-        DOWNSTREAM_ENV
-    shell:
-        r"""
-        set -euo pipefail
-
-        cooltools expected-cis \
-          -p {threads} \
-          --view {input.view} \
-          -o {output} \
-          {input.cool}
-        """
-
-
-rule pooled_loop_dots:
-    input:
-        cool=rules.pooled_loop_cool.output,
-        expected=rules.pooled_loop_expected.output,
-        view=MAIN_VIEW
-    output:
-        f"{RESULTS}/loops/pooled_all_samples.dots.tsv"
-    threads:
-        THREADS
-    conda:
-        DOWNSTREAM_ENV
+        MUSTACHE_ENV
     params:
-        maxdist=int(
-            config["loops"]["max_distance_bp"]
+        res=LOOP_RES,
+        pt=float(
+            config.get(
+                "loops",
+                {}
+            ).get(
+                "mustache_pvalue_threshold",
+                0.1
+            )
         ),
-        fdr=float(
-            config["loops"]["pooled_dot_fdr"]
+        st=float(
+            config.get(
+                "loops",
+                {}
+            ).get(
+                "mustache_sparsity_threshold",
+                0.88
+            )
         )
     shell:
         r"""
         set -euo pipefail
 
-        cooltools dots \
+        mkdir -p {LOOPS_DIR}
+
+        mustache \
+          -f {input.cool} \
+          -r {params.res} \
+          -pt {params.pt} \
+          -st {params.st} \
           -p {threads} \
-          --view {input.view} \
-          --max-loci-separation {params.maxdist} \
-          --tile-size {params.maxdist} \
-          --fdr {params.fdr} \
-          -o {output} \
-          {input.cool} \
-          {input.expected}
+          -o {output.loops}
+
+        printf \
+          "parameter\tvalue\ncaller\tMustache\nresolution_bp\t%s\npvalue_threshold\t%s\nsparsity_threshold\t%s\nthreads\t%s\n" \
+          "{params.res}" \
+          "{params.pt}" \
+          "{params.st}" \
+          "{threads}" \
+          > {output.parameters}
+
+        python -m pip freeze \
+          | sort \
+          > {output.versions}
         """
 
 
-rule loop_counts:
+rule canonical_loop_candidates:
     input:
-        dots=rules.pooled_loop_dots.output,
-        cools=expand(
-            f"{RESULTS}/loops/cool/{{sample}}.{LOOP_RES}.cool",
-            sample=SAMPLES
-        )
+        loops=rules.pooled_loop_mustache.output.loops,
+        view=MAIN_VIEW
     output:
-        counts=f"{RESULTS}/loops/pooled_loop_candidates_counts.tsv.gz",
-        bedpe=f"{RESULTS}/loops/pooled_loop_candidates.bedpe.tsv"
+        f"{LOOPS_DIR}/pooled_loop_candidates.bedpe.tsv"
     conda:
         DOWNSTREAM_ENV
     params:
-        samples=",".join(SAMPLES),
-        cool_pattern=lambda wildcards: f"{RESULTS}/loops/cool/{{sample}}.{LOOP_RES}.cool",
         res=LOOP_RES,
         mindist=int(
             config["loops"]["min_distance_bp"]
         ),
         maxdist=int(
             config["loops"]["max_distance_bp"]
-        ),
+        )
+    shell:
+        r"""
+        set -euo pipefail
+
+        python {SCRIPTS}/mustache_to_bedpe.py \
+          --input {input.loops} \
+          --output {output} \
+          --view {input.view} \
+          --resolution {params.res} \
+          --min-distance-bp {params.mindist} \
+          --max-distance-bp {params.maxdist}
+        """
+
+
+rule loop_counts:
+    input:
+        loops=rules.canonical_loop_candidates.output,
+        cools=expand(
+            f"{LOOPS_DIR}/cool/{{sample}}.cool",
+            sample=SAMPLES
+        )
+    output:
+        counts=f"{LOOPS_DIR}/pooled_loop_candidates_counts.tsv.gz",
+        libraries=f"{LOOPS_DIR}/loop_library_sizes.tsv"
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        samples=",".join(SAMPLES),
+        cool_pattern=lambda wildcards:
+            f"{LOOPS_DIR}/cool/{{sample}}.cool",
+        res=LOOP_RES,
         radius=int(
             config["loops"]["quant_radius_bins"]
         )
@@ -827,47 +936,181 @@ rule loop_counts:
         python {SCRIPTS}/build_loop_counts.py \
           --samples '{params.samples}' \
           --resolution {params.res} \
-          --min-distance-bp {params.mindist} \
-          --max-distance-bp {params.maxdist} \
           --quant-radius-bins {params.radius} \
-          --dots {input.dots} \
+          --loops {input.loops} \
           --cool-pattern '{params.cool_pattern}' \
-          --outdir {RESULTS}/loops
+          --outdir {LOOPS_DIR}
         """
 
 
 rule differential_loops:
     input:
-        rules.loop_counts.output.counts
+        counts=rules.loop_counts.output.counts,
+        libraries=rules.loop_counts.output.libraries
     output:
-        all=f"{RESULTS}/loops/differential_loops_all.tsv.gz",
-        core=f"{RESULTS}/loops/differential_loops_core.tsv",
-        summary=f"{RESULTS}/loops/differential_loop_summary.tsv",
-        filtering=f"{RESULTS}/loops/loop_filtering_summary.tsv",
-        pdf=f"{RESULTS}/loops/EXP_differential_loops_volcano.pdf"
+        all=f"{LOOPS_DIR}/differential_loops_all.tsv.gz",
+        significant=f"{LOOPS_DIR}/differential_loops_FDR_effect.tsv",
+        core=f"{LOOPS_DIR}/differential_loops_core.tsv",
+        summary=f"{LOOPS_DIR}/differential_loop_summary.tsv",
+        filtering=f"{LOOPS_DIR}/loop_filtering_summary.tsv",
+        normalization=f"{LOOPS_DIR}/loop_normalization_factors.tsv",
+        volcano=f"{LOOPS_DIR}/EXP_differential_loops_volcano.pdf",
+        qc=f"{LOOPS_DIR}/EXP_differential_loops_QC.pdf"
     conda:
         R_ENV
     params:
-        controls=",".join(CONTROL_SAMPLES),
-        tests=",".join(TEST_SAMPLES),
+        controls=",".join(
+            CONTROL_SAMPLES
+        ),
+        tests=",".join(
+            TEST_SAMPLES
+        ),
         fdr=float(
-            config["loops"]["differential_fdr"]
+            config["loops"][
+                "differential_fdr"
+            ]
         ),
         lfc=float(
-            config["loops"]["differential_min_abs_log2fc"]
+            config["loops"][
+                "differential_min_abs_log2fc"
+            ]
+        ),
+        mincount=int(
+            config.get(
+                "loops",
+                {}
+            ).get(
+                "edgeR_min_count",
+                5
+            )
+        ),
+        mintotal=int(
+            config.get(
+                "loops",
+                {}
+            ).get(
+                "edgeR_min_total_count",
+                15
+            )
         )
     shell:
         r"""
         set -euo pipefail
 
-        Rscript {SCRIPTS}/differential_loops_edgeR.R \
-          --input {input} \
-          --outdir {RESULTS}/loops \
+        Rscript \
+          {SCRIPTS}/differential_loops_edgeR.R \
+          --input {input.counts} \
+          --library-sizes {input.libraries} \
+          --outdir {LOOPS_DIR} \
           --fdr {params.fdr} \
           --min-abs-log2fc {params.lfc} \
+          --min-count {params.mincount} \
+          --min-total-count {params.mintotal} \
           --control-samples '{params.controls}' \
           --test-samples '{params.tests}'
         """
+
+
+
+
+rule loop_report:
+    input:
+        summary=rules.differential_loops.output.summary,
+        filtering=rules.differential_loops.output.filtering,
+        normalization=rules.differential_loops.output.normalization,
+        all_results=rules.differential_loops.output.all,
+        core_results=rules.differential_loops.output.core,
+        library_sizes=rules.loop_counts.output.libraries,
+        parameters=rules.pooled_loop_mustache.output.parameters,
+        versions=rules.pooled_loop_mustache.output.versions
+    output:
+        md=f"{LOOPS_DIR}/MicroC_loop_analysis_report.md",
+        html=f"{LOOPS_DIR}/MicroC_loop_analysis_report.html"
+    conda:
+        DOWNSTREAM_ENV
+    params:
+        res=LOOP_RES,
+        fdr=float(
+            config["loops"]["differential_fdr"]
+        ),
+        lfc=float(
+            config["loops"]["differential_min_abs_log2fc"]
+        ),
+        control=CONTROL_CONDITION or "control",
+        test=TEST_CONDITION or "test",
+        radius=int(config["loops"]["quant_radius_bins"])
+    shell:
+        r"""
+        set -euo pipefail
+
+        python {SCRIPTS}/build_loop_report.py \
+          --summary {input.summary} \
+          --filtering {input.filtering} \
+          --normalization {input.normalization} \
+          --all-results {input.all_results} \
+          --core-results {input.core_results} \
+          --library-sizes {input.library_sizes} \
+          --parameters {input.parameters} \
+          --versions {input.versions} \
+          --resolution {params.res} \
+          --fdr {params.fdr} \
+          --lfc {params.lfc} \
+          --quant-radius {params.radius} \
+          --control-label '{params.control}' \
+          --test-label '{params.test}' \
+          --output-md {output.md} \
+          --output-html {output.html}
+        """
+
+
+
+
+rule methods_config:
+    output:
+        f"{RESULTS}/provenance/methods_resolved_config.yaml"
+    params:
+        configuration_sha256=CONFIG_FINGERPRINT
+    run:
+        import yaml
+
+        os.makedirs(
+            os.path.dirname(output[0]),
+            exist_ok=True
+        )
+
+        with open(output[0], "w") as fh:
+            yaml.safe_dump(
+                dict(config),
+                fh,
+                sort_keys=False
+            )
+
+
+rule methods_report:
+    input:
+        config=rules.methods_config.output,
+        completed=QC_TARGETS + ANALYSIS_TARGETS
+    output:
+        md=f"{RESULTS}/report/MicroC_methods_provenance.md",
+        txt=f"{RESULTS}/report/MicroC_methods_paper.txt"
+    conda:
+        METHODS_ENV
+    params:
+        compare_flag="" if DIFFERENTIAL_ENABLED else "--no-differential"
+    shell:
+        r"""
+        set -euo pipefail
+
+        mkdir -p {RESULTS}/report
+
+        python {SCRIPTS}/build_microc_methods.py \
+          {params.compare_flag} \
+          --config {input.config} \
+          --pipeline-dir {PIPELINE_DIR} \
+          --output-md {output.md} \
+          --output-txt {output.txt}
+        """
+
 
 
 rule library_complexity:
@@ -962,7 +1205,8 @@ rule provenance:
     input:
         processing=f"{RESULTS}/provenance/processing_versions.tsv",
         downstream=f"{RESULTS}/provenance/downstream_versions.tsv",
-        r=f"{RESULTS}/provenance/r_versions.tsv"
+        r=f"{RESULTS}/provenance/r_versions.tsv",
+        methods_config=rules.methods_config.output
     output:
         config=f"{RESULTS}/provenance/resolved_config.yaml",
         versions=f"{RESULTS}/provenance/software_versions.tsv",
@@ -973,10 +1217,36 @@ rule provenance:
         f"{SCRIPTS}/write_provenance.py"
 
 
+rule report:
+    input:
+        completed=QC_TARGETS + ANALYSIS_TARGETS,
+        methods_txt=rules.methods_report.output.txt,
+        methods_md=rules.methods_report.output.md,
+        provenance=rules.provenance.output.versions
+    output:
+        html=f"{RESULTS}/report/MicroC_report.html",
+        summary=f"{RESULTS}/report/MicroC_summary.tsv",
+        index=f"{RESULTS}/report/MicroC_output_index.tsv"
+    conda:
+        METHODS_ENV
+    params:
+        comparison="yes" if DIFFERENTIAL_ENABLED else "no"
+    shell:
+        r"""
+        set -euo pipefail
+        python {SCRIPTS}/build_microc_report.py \
+          --config {RESULTS}/provenance/methods_resolved_config.yaml \
+          --results {RESULTS} \
+          --report-dir {RESULTS}/report \
+          --differential {params.comparison}
+        """
+
+
 rule all:
     input:
-        rules.qc.input,
-        rules.downstream.input,
-        f"{RESULTS}/provenance/resolved_config.yaml",
-        f"{RESULTS}/provenance/software_versions.tsv",
-        f"{RESULTS}/provenance/run_summary.tsv"
+        rules.report.output.html,
+        rules.report.output.summary,
+        rules.report.output.index,
+        rules.provenance.output.config,
+        rules.provenance.output.versions,
+        rules.provenance.output.summary

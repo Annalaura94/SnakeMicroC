@@ -17,6 +17,11 @@ qc:
   recommended_total_pairs: 150000000
   qc_map_resolution: 1000000
 contact_maps:
+  # For ordinary new experiments this must remain false.
+  # Only a previously verified legacy workspace may opt in; the evidence
+  # must match ALL configured samples and be newer than the matrix files.
+  reuse_verified_existing_mcools: false
+  # existing_mcool_equivalence_tsv: /absolute/workspace/results/provenance/mcool_50kb_pixel_equivalence.tsv
   base_resolution: 25000
   resolutions:
   - 25000
@@ -31,6 +36,11 @@ reproducibility:
   resolution: 100000
   hicrep_h: 1
   hicrep_max_distance: 5000000
+analysis:
+  # Run differential comparisons only with >=2 samples in each group.
+  differential: true
+  # Set true to stop if a requested differential comparison lacks replication.
+  require_differential: true
 comparison:
   control_condition: CONTROL
   test_condition: TEST
@@ -82,6 +92,8 @@ contacts:
   prefilter_min_nonzero_samples: 2
   differential_fdr: 0.05
   differential_min_abs_log2fc: 0.75
+  edgeR_min_count: 5
+  edgeR_min_total_count: 15
 loops:
   primary_resolution: 10000
   sensitivity_resolutions:
@@ -90,7 +102,9 @@ loops:
   - 25000
   min_distance_bp: 50000
   max_distance_bp: 5000000
-  pooled_dot_fdr: 0.02
+  mustache_pvalue_threshold: 0.1
+  mustache_sparsity_threshold: 0.88
+  mustache_threads: 12
   differential_fdr: 0.05
   differential_min_abs_log2fc: 0.75
   sensitivity_abs_log2fc:

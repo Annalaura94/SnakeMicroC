@@ -25,6 +25,8 @@ infile <- get_arg("--input")
 outdir <- get_arg("--outdir")
 fdr_cut <- as.numeric(get_arg("--fdr"))
 lfc_cut <- as.numeric(get_arg("--min-abs-log2fc"))
+min_count <- as.integer(get_arg("--min-count"))
+min_total_count <- as.integer(get_arg("--min-total-count"))
 
 control_samples <- split_csv(get_arg("--control-samples"))
 test_samples <- split_csv(get_arg("--test-samples"))
@@ -71,8 +73,8 @@ y <- DGEList(counts = counts, group = group)
 keep <- filterByExpr(
   y,
   group = group,
-  min.count = 5,
-  min.total.count = 20
+  min.count = min_count,
+  min.total.count = min_total_count
 )
 
 filter_summary <- data.table(

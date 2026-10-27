@@ -10,6 +10,7 @@ dependencies:
 - numpy
 - scipy
 - pandas
+- tabulate
 - matplotlib
 - pyyaml
 - h5py

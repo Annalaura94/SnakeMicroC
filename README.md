@@ -2,7 +2,7 @@
 
 An experimental, versioned **Micro-C analysis workflow** based on Snakemake. It processes paired-end FASTQ data into deduplicated pairs, multiresolution contact matrices, QC, structural tracks, and (when supported by the design) differential contacts and chromatin loops. It generates a navigable HTML report, TSV summary/index and Methods text from a single run target.
 
-> **Status: consolidation release candidate (RC2), 26 October 2026.** Python-level tests pass. A real Snakemake dry-run, Conda environment resolution, and complete MIAT end-to-end validation on the cluster are still required before release or publication. The repository snapshot used for this RC came from the read-only server audit; it has **not** been installed on the laboratory server or published to GitHub.
+> **Status: audited RC2 development branch (28 October 2026).** The MIAT batch1 deep workspace completed 21/21 Snakemake steps on 27 October 2026, and the separate MIAT batch2 shallow-QC workspace completed 25/25 steps (four libraries). Python unit tests and MIAT/synthetic dry-runs were also verified during installation. This supports the tested MIAT workflows, **not** all possible genomes, sample designs or new experiments. Publication/merging of this branch remains a separate release step.
 
 ## Quick start
 
@@ -96,7 +96,7 @@ The test suite uses fake Snakemake and synthetic TSVs; it does **not** test mapp
 - Every code change must be reviewed in Git with tests. Avoid project-specific scripts and exploratory outputs inside the generic pipeline.
 - Example human config: `config/config.template.yaml`. Actual MIAT paths/config stay with the experiment, not in a public code repository.
 
-For the scientific and migration caveats see [MIAT migration](docs/MIAT_MIGRATION.md) and [release gates](docs/RELEASE_GATES.md).
+For the scientific and migration caveats see [MIAT migration](docs/MIAT_MIGRATION.md) and [release gates](docs/RELEASE_GATES.md). For a new dataset or additional sequencing of an existing library, follow the [operating guide](docs/OPERATING_GUIDE.md) and [release checklist](docs/RELEASE_CHECKLIST.md).
 
 
 ### Audited reuse of legacy multi-resolution matrices
@@ -150,6 +150,9 @@ Remove `--dry-run` only after reviewing the sample-to-FASTQ mapping and DAG.
 The QC-only command automatically includes its report and Methods; it does
 not process batch1 data. A change in FASTQ source layout, read depth, or
 sequencing run always requires a new workspace and explicit provenance.
+Do not treat newly prepared libraries as new biological replicates by default,
+and do not simply concatenate separately deduplicated pairs when adding
+sequencing reads from the same library. See `docs/OPERATING_GUIDE.md`.
 
 ## Added full-depth report diagnostics
 

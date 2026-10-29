@@ -21,21 +21,26 @@ class ShallowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             t=Path(td); fastq=t/'fastqs'; fastq.mkdir()
             for mate in ('1','2'):
-                (fastq/f'MIATBatch2_S1_L001_R{mate}_001.fastq.gz').write_bytes(b'example')
+                (fastq/f'Library_A_S1_L001_R{mate}_001.fastq.gz').write_bytes(b'example')
             template=yaml.safe_load((ROOT/'config/config.template.yaml').read_text())
             base=t/'base.yaml'; base.write_text(yaml.safe_dump(template))
             c=make_config(base,fastq,t/'newspace')
             self.assertEqual(c['analysis']['mode'],'shallow_qc')
             self.assertFalse(c['analysis']['differential'])
             self.assertFalse(c['contact_maps']['reuse_verified_existing_mcools'])
-            self.assertEqual(list(c['samples']),['MIATBatch2'])
+            self.assertEqual(list(c['samples']),['Library_A'])
+            self.assertEqual(c['samples']['Library_A']['condition'], 'PILOT')
+            configured = make_config(base, fastq, t/'other', condition='CONDITION_A')
+            self.assertEqual(configured['samples']['Library_A']['condition'], 'CONDITION_A')
+            with self.assertRaisesRegex(ValueError, 'Invalid condition label'):
+                make_config(base, fastq, t/'invalid', condition='invalid name')
             conf=t/'config.yaml'; conf.write_text(yaml.safe_dump(c))
             self.assertEqual(load_and_validate(conf)['analysis_mode'],'shallow_qc')
             c['analysis']['differential']=True
             conf.write_text(yaml.safe_dump(c))
             with self.assertRaisesRegex(ConfigurationError,'shallow_qc'):
                 load_and_validate(conf)
-            (fastq/'MIATBatch2_L002_R1_001.fastq.gz').write_bytes(b'other lane')
+            (fastq/'Library_A_L002_R1_001.fastq.gz').write_bytes(b'other lane')
             with self.assertRaisesRegex(ValueError,'Multiple R1'):
                 discover_pairs(fastq)
 
@@ -44,12 +49,12 @@ class ShallowTests(unittest.TestCase):
             t=Path(td)
             cfg=yaml.safe_load((ROOT/'config/config.template.yaml').read_text())
             cfg['analysis']={'mode':'shallow_qc','differential':False,'require_differential':False}
-            cfg['comparison']={};cfg['samples']={'PILOT': {'condition':'BATCH2','r1':'absent_R1.fq.gz','r2':'absent_R2.fq.gz'}}
+            cfg['comparison']={};cfg['samples']={'PILOT': {'condition':'PILOT','r1':'absent_R1.fq.gz','r2':'absent_R2.fq.gz'}}
             conf=t/'c.yaml';conf.write_text(yaml.safe_dump(cfg))
             result=t/'results';(result/'report').mkdir(parents=True)
             (result/'qc').mkdir()
             (result/'qc/qc_status.txt').write_text('PILOT\tSCREEN_PASS')
-            pd.DataFrame([{'sample':'PILOT','condition':'BATCH2','no_dup_read_pairs':10000,
+            pd.DataFrame([{'sample':'PILOT','condition':'PILOT','no_dup_read_pairs':10000,
                            'dovetail_deep_qc_pass':'NOT_EVALUATED','shallow_screening_status':'SCREEN_PASS'}]).to_csv(result/'qc/qc_summary.tsv',sep='\t',index=False)
             for rel in ('qc/library_complexity.tsv','qc/scaling_curves.tsv','qc/contact_map_correlation_1Mb.tsv'):
                 pd.DataFrame([{'sample':'PILOT','value':1}]).to_csv(result/rel,sep='\t',index=False)

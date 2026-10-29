@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate opt-in adoption of existing MIAT/legacy multi-resolution coolers.
+"""Validate opt-in adoption of existing audited legacy multi-resolution coolers.
 
 This verifies a previously produced full 50-kb bin/pixel comparison manifest.
 The evidence must be newer than both matrices it compared. It does not

@@ -44,7 +44,7 @@ class ReleaseGuardTests(unittest.TestCase):
             tmp_path = Path(td)
             config = yaml.safe_load((ROOT / 'config' / 'config.template.yaml').read_text())
 
-            # Five sample libraries: exercise comparison beyond MIAT/4 samples.
+            # Five sample libraries: exercise a non-fixed sample count.
             samples = {}
             for i in range(1, 4):
                 samples[f'CONTROL_{i}'] = {'condition': 'CTRL', 'clone': f'CTRL_{i}'}
@@ -77,7 +77,6 @@ class ReleaseGuardTests(unittest.TestCase):
             self.assertIn('2 DRUG', detailed)
             self.assertIn('all 5 samples', detailed)
             self.assertIn('every test sample', detailed)
-            self.assertNotIn('MIAT', manuscript)
             self.assertNotIn('GRCh38 primary assembly', manuscript)
             self.assertIn('Configured optional loop resolutions (execution not verified)', detailed)
             self.assertIn('5 kb and 25 kb', detailed)

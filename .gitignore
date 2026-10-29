@@ -32,7 +32,9 @@ __pycache__/
 # Do not commit credential-bearing or local run configuration
 config/*local*.yaml
 config/*secret*.yaml
-config.MIAT*.yaml
 
 backup_before_*/
 *.before_paper_ready
+/config.yaml
+/config.*.yaml
+config/*private*.yaml

@@ -1,43 +1,42 @@
-# SnakeMicroC RC2 — gates to stable release
+# SnakeMicroC validation gates
 
-| Gate | Requirement | RC2 status |
-| --- | --- | --- |
-| Source tree | One canonical `rules/Snakefile`, root symlink entrypoint; no copied, independently maintained rule versions | Prepared in isolated source snapshot |
-| Python unit tests | Config, CLI, summary report, Methods, ID determinism | **Passed locally** (8 synthetic tests) |
-| R model tests | Confirm contact 50-kb filters, edgeR CLI thresholds, loop model, TMM and low-count behavior using small fixtures | Not yet tested |
-| Snakemake DAG | Parse from root symlink; dry-run `qc`, `report`, `all` with single/multi-sample configs | **Required on server** |
-| Conda | Fresh resolution, record exact versions, compatibility across five env files | **Required on server** |
-| End-to-end | Real MIAT run or audited reuse of existing outputs; check expected counts and file integrity | **Required on server** |
-| Scientific QA | QC depth/complexity, HiCRep, compartment phase, insulation, contact-distance filtering, loop sensitivity | Not yet closed |
-| Report | Correct HTML links and fully accurate Methods and per-sample metrics with real outputs | Synthetic tests passed; real MIAT still required |
-| GitHub | Branch, reviewed diff, tests, no data/secrets, CI, protected merge/tag | Not published |
-| Cleanup | Verified backup, hash ledger, retention policy, quarantine before deletion | Not authorized / not done |
+The workflow is research software. The status of individual tests must be
+recorded for each release; do not infer a production guarantee from synthetic
+test success or from one representative experiment.
 
-## Checks to run on server
+| Gate | Evidence required |
+| --- | --- |
+| Source | Canonical `rules/Snakefile`, working root symlink, generic config, no experiment data. |
+| Python | Unit tests for config, CLI, reports, shallow mode, matrix reuse and QC views. |
+| R/statistics | Exercise edgeR thresholds, normalization, low counts and modeling assumptions on fixtures. |
+| Snakemake | DAG parses and dry-runs for QC/full modes with one and multiple samples. |
+| Environments | Fresh Conda solve, documented versions and file compatibility. |
+| Real data | Complete representative full-depth and shallow workflows with audited outputs. |
+| Scientific QA | Mapping/dedup, cis/trans, complexity, HiCRep, structure tracks, distance filters, loop diagnostics. |
+| Reporting | HTML links, index, per-sample counts, QC labels, Methods and provenance verified. |
+| Release | Reviewed git diff, no paths/data/secrets, tested revision and no force push. |
 
-1. `python -m unittest discover -s tests -p 'test*.py' -v`
-2. `bin/microc validate --config /path/to/MIAT/config_mustache_v1.yaml`
-3. `bin/microc qc --config /path/to/config.yaml --workdir /path/to/experiment --cores 8 --dry-run --rerun-triggers mtime`
-4. `bin/microc run --config /path/to/config.yaml --workdir /path/to/experiment --cores 24 --dry-run --rerun-triggers mtime`
-5. Inspect the Snakemake DAG, missing files and rule triggers; record dry-run log in project `logs/`.
-6. Only after review run targeted jobs with frozen code and documented parameters. Generate real report and compare it to frozen outputs.
-7. When the full run is complete, repeat the dry-run to check no unexpected jobs remain.
+## Local development checks
 
-## What is intentionally excluded from generic Micro-C core
+```bash
+python3 -m unittest discover -s tests -p 'test*.py' -v
+python3 -m compileall -q scripts bin
+bin/microc validate --config /path/to/workspace/config.yaml --check-paths
+bin/microc qc --config /path/to/workspace/config.yaml --workdir /path/to/workspace --cores 8 --dry-run
+bin/microc run --config /path/to/workspace/config.yaml --workdir /path/to/workspace --cores 16 --dry-run
+```
 
-MIAT-specific RNA-seq, ChIRP, triplex, cCRE and gene-locus interpretation belong in a separately versioned downstream integration module. They must not become hidden requirements for running a new Micro-C dataset.
+Synthetic Python tests do not exercise external aligners, peak callers,
+Conda solving, R model fitting, or end-to-end processing of actual FASTQs.
+For different genomes, independent adaptation and validation of reference
+handling are required.
 
-## Reproducibility caveats
+## Scientific cautions
 
-This snapshot is not an environment lock. `snakemake` was unavailable in the local container, and downloading it failed, so actual Snakemake parsing could not be certified here. Do not claim RC2 production-ready until the server checks above pass.
-
-
-## RC2 matrix-reuse gate (27 Oct 2026)
-
-- [x] Four MIAT full 50-kb raw pixel/bin comparisons PASS (reported by user).
-- [ ] Verify `run --dry-run` on shared source using the audited MIAT manifest; no legacy `.mcool` rebuild may appear.
-- [ ] Inspect all configured `.mcool` zoom levels and balancing weights on the server.
-- [ ] Confirm single `insulation_cool` is not needed when insulation/loop resolutions agree.
-- [ ] Finish requested 10-kb insulation, 50-kb differential contacts, QC and integrated report.
-- [ ] Check that a second dry-run is no-op and that Methods accurately describe adopted matrices.
-- [ ] Review Git diff; no backup directories, datasets or credentials in the commit.
+- Group-level structural differences are descriptive unless formally tested.
+- Clones, libraries and sequencing runs are not automatically independent
+  biological replicates.
+- A differential contact is not, on its own, proof of a specific enhancer-
+  promoter interaction or formation/loss of a loop.
+- Reusing existing matrices requires verified bin/pixel equivalence and
+  provenance; never bypass the checks to avoid computational cost.

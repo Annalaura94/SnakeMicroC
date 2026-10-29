@@ -1,50 +1,37 @@
-# SnakeMicroC - release checklist
+# SnakeMicroC release checklist
 
-Before updating the shared GitHub repository:
+This checklist concerns the **pipeline source**, not an individual project's
+results. Use a feature branch and a reviewed commit; do not force-push.
 
-1. Confirm the installed source directory `/home/reference_data/pipelines/SnakeMicroC`
-   is the single active code checkout, not a data workspace. Record commit,
-   branch, `git status` and configured Git remote. Do not add outputs, raw data,
-   caches or local lab configs.
-2. Run `python -m unittest discover -s tests -p 'test*.py' -v` and
-   `python -m compileall -q scripts bin` in the validated Python environment.
-3. Confirm at least one representative full-depth workflow completed with
-   its expected report, structural outputs and provenance; verify successful
-   exit status. Separately confirm a representative shallow QC-only workflow
-   completed with exactly the intended libraries.
-4. On an unrelated synthetic/new dataset, validate the sample/FASTQ mapping,
-   and complete a Snakemake dry-run. An earlier test run on MIAT does not by
-   itself establish arbitrary-design or nonhuman support.
-5. Re-run a **dry-run** of the completed reference workspace. It should not
-   schedule heavy mapping, matrix creation, Mustache or differential analyses
-   without a deliberate change to inputs or provenance.
-6. Review `git diff --check`, `git status --short`, the changed documentation
-   and exact staged paths. Push only the tested, reviewed Git commit, and
-   use a feature branch/PR rather than forcing changes to `main`.
+1. Record `git status -sb`, current commit and remote. Start with a clean tree.
+2. Confirm `git ls-files` contains only source, environment specifications,
+   tests, templates and generic documentation. Do not commit local configs,
+   experiment identifiers, personal paths, raw reads, matrices or reports.
+3. Run `python3 -m unittest discover -s tests -p 'test*.py' -v` and
+   `python3 -m compileall -q scripts bin` in a suitable environment.
+4. Validate a synthetic or independent configuration. Verify Snakemake
+   `qc --dry-run` and `run --dry-run` from a fresh workspace.
+5. Verify a representative full-depth end-to-end run and a distinct shallow
+   QC run. Record exact software versions, inputs, outputs, Methods and the
+   code revision. A pass on one experiment does not certify every design.
+6. Confirm that a no-change rerun does not silently schedule heavy matrix,
+   mapping, differential or loop calls.
+7. Review `git diff --check`, the complete staged diff and test results.
+8. Push the reviewed feature branch and merge via an ordinary PR. Avoid
+   history rewriting or forced updates to `main`.
 
-Example publish steps (only after steps 1-6 pass):
+Example:
 
 ```bash
-SRC=/home/reference_data/pipelines/SnakeMicroC
-cd "$SRC"
+cd /path/to/SnakeMicroC
 git status -sb
-git branch --show-current
-git remote -v
-git log -3 --oneline
+git ls-files
 git diff --check
-# Review changes and commit intentional source/doc files only.
-git push -u origin feature/microc-unified-rc2
+python3 -m unittest discover -s tests -p 'test*.py' -v
+python3 -m compileall -q scripts bin
+# After review, commit only the intended source changes.
 ```
 
-If the remote branch diverged, stop and review; do not force-push.
-Push only updates the feature branch. A merge to the repository's main branch
-and a release/tag require their own review.
-
-The repository `.gitignore` should continue to exclude FASTQ, pair files,
-matrices and run outputs; test `git ls-files` before publishing, not just
-`git status`, because already tracked files are unaffected by `.gitignore`.
-
-**Archive and cleanup:** stage results and record checksums, verify source
-locations and backup, compare manifests, and only then separately choose
-nonessential duplicates for deletion. This release procedure performs no
-destructive cleanup.
+A working `.gitignore` does not untrack files previously committed; inspect
+`git ls-files`, not just `git status`. Data and archive cleanup are separate
+operations and must not be coupled to source releases.

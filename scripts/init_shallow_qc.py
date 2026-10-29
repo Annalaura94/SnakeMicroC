@@ -45,7 +45,7 @@ def discover_pairs(folder):
     return {s: {"r1": str(mates["1"]), "r2": str(mates["2"])} for s, mates in sorted(samples.items())}
 
 
-def make_config(base_config, fastq_dir, workspace):
+def make_config(base_config, fastq_dir, workspace, condition="PILOT"):
     base = Path(base_config)
     cfg = yaml.safe_load(base.read_text(encoding="utf8"))
     if not isinstance(cfg, dict):
@@ -53,8 +53,10 @@ def make_config(base_config, fastq_dir, workspace):
     cfg["tmpdir"] = str((Path(workspace).resolve() / "tmp"))
     cfg["results_dir"] = "results"
     pairs = discover_pairs(fastq_dir)
+    if not ID_RE.fullmatch(condition):
+        raise ValueError(f"Invalid condition label: {condition}")
     cfg["samples"] = {
-        sample: {"condition": "BATCH2", "clone": sample, **paths}
+        sample: {"condition": condition, "clone": sample, **paths}
         for sample, paths in pairs.items()
     }
     cfg["analysis"] = {"mode": "shallow_qc", "differential": False, "require_differential": False}
@@ -73,13 +75,14 @@ def main(argv=None):
                         help="Existing validated Micro-C YAML from the same reference genome")
     parser.add_argument("--fastq-dir", required=True)
     parser.add_argument("--workspace", required=True)
+    parser.add_argument("--condition", default="PILOT", help="Generic grouping label, not a biological inference")
     args = parser.parse_args(argv)
     workspace = Path(args.workspace).resolve()
     target = workspace / "config_shallow_qc.yaml"
     if target.exists():
         parser.error(f"Refusing to overwrite existing configuration: {target}")
     try:
-        cfg = make_config(args.base_config, args.fastq_dir, workspace)
+        cfg = make_config(args.base_config, args.fastq_dir, workspace, args.condition)
         from validate_config import load_and_validate
         workspace.mkdir(parents=True, exist_ok=True)
         target.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf8")
